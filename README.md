@@ -24,7 +24,11 @@ history (`#/`, `#/audio`, `#/timebase`, `#/settings`).
   - _Mechanical_: rate, beat error and amplitude tiles (averaged value plus the
     instant one), A/h, editable lift angle, lock state; the tick-tock
     (paper-strip) chart with window, raw / flatten, scale (auto, fixed, full)
-    and fold options; a balance-wheel animation; a trend chart.
+    and fold options; a balance-wheel animation; a trend chart. The tick-tock
+    chart plots each beat's lead (early = up), so like a conventional
+    timegrapher a gaining watch's trace rises and its slope matches the rate
+    trend; dashed fitted lines show that slope, and the gap between the tick
+    and tock lines is the beat error.
   - _Quartz_: headline rate (motor: with inhibition; LCD / fork: oscillator
     rate), raw and uncalibrated rates, state and reason, motor inhibition, gate
     selector, fork frequency, SNR / clipping hints and the motor pulse chart.

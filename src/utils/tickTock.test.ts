@@ -1,6 +1,7 @@
 /** Tests for the tick-tock maths, including the rate sign convention. */
 import { describe, expect, it } from 'vitest';
 import {
+  fitLinePoints,
   fitTickTock,
   foldResidual,
   linearFit,
@@ -96,8 +97,34 @@ describe('plotValueUs / windowStart', () => {
     const pts = synth(30, 0);
     const fit = fitTickTock(pts);
     for (const p of pts) expect(plotValueUs(p, fit, false)).toBeCloseTo(0, 4);
-    const big: TickPoint = { ...pts[0]!, uUs: 70000 };
+    const big: TickPoint = { ...pts[0]!, uUs: -70000 };
     expect(plotValueUs(big, null, true)).toBeCloseTo(-55000);
+  });
+  it('plots the lead, so a gaining watch rises with slope = rate / 0.0864', () => {
+    // Same-parity points, so the tick/tock offset does not enter the slope.
+    const evens = synth(12.5, 300).filter((p) => p.parity === 0);
+    const e0 = evens[0]!;
+    const e1 = evens[evens.length - 1]!;
+    const evenSlope =
+      (plotValueUs(e1, null, false) - plotValueUs(e0, null, false)) / (e1.tS - e0.tS);
+    expect(evenSlope).toBeGreaterThan(0);
+    expect(evenSlope * 0.0864).toBeCloseTo(12.5, 6);
+    const losing = synth(-8, 0).filter((p) => p.parity === 0);
+    expect(plotValueUs(losing[losing.length - 1]!, null, false)).toBeLessThan(0);
+  });
+  it('fit lines follow the plotted points and are offset by the beat error', () => {
+    const pts = synth(20, 400);
+    const fit = fitTickTock(pts)!;
+    const t1 = pts[pts.length - 1]!.tS;
+    const tick = fitLinePoints(fit, 0, 0, t1, 125000, false)!;
+    const tock = fitLinePoints(fit, 1, 0, t1, 125000, false)!;
+    expect(tick[1][1]).toBeGreaterThan(tick[0][1]);
+    expect((tick[1][1] - tick[0][1]) / t1).toBeCloseTo(20 / 0.0864, 3);
+    expect(tick[0][1] - tock[0][1]).toBeCloseTo(400, 3);
+    const lastEven = pts.filter((p) => p.parity === 0).at(-1)!;
+    const onLine = fitLinePoints(fit, 0, lastEven.tS, lastEven.tS, 125000, false)!;
+    expect(onLine[0][1]).toBeCloseTo(plotValueUs(lastEven, null, false), 3);
+    expect(fitLinePoints(fit, 0, 0, 1e6, 125000, true)).toBeNull();
   });
   it('binary-searches the window start', () => {
     const pts = synth(0, 0, 100);

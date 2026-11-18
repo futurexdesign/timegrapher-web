@@ -12,6 +12,15 @@
  * The even-parity (tick) and odd-parity (tock) clouds are offset by the beat
  * error: beatError = |offset between the clouds|, which we obtain from a joint
  * least-squares fit `u = a + b*t + d*parity` (common slope, `d` = separation).
+ *
+ * Display convention: the chart plots the LEAD, `-u` (early = up), like a
+ * conventional timegrapher strip. Its slope then has the sign of the rate and
+ * reads directly against the rate trend: a gaining watch rises,
+ *
+ *   rate_s_day = +slope_of_plot [µs per s] * 0.0864
+ *
+ * The fit and the conversions below stay in terms of `u` (the firmware value);
+ * only {@link plotValueUs} and {@link fitLinePoints} return display values.
  */
 
 /** Seconds per day. */
@@ -233,14 +242,47 @@ export function windowStart(points: readonly TickPoint[], tMin: number): number 
 }
 
 /**
- * Value to plot for a point.
+ * Value to plot for a point: the lead `-u` (early = positive), so the raw
+ * trace slopes with the sign of the rate.
  * @param p The point.
  * @param fit Fit to subtract (flatten mode), or null for raw.
  * @param fold Wrap into ± nominal/2.
- * @returns Residual in microseconds.
+ * @returns Lead in microseconds (+ = early).
  */
 export function plotValueUs(p: TickPoint, fit: TickTockFit | null, fold: boolean): number {
   let y = p.uUs;
   if (fit) y -= fit.interceptUs + fit.slopeUsPerS * p.tS;
-  return fold ? foldResidual(y, p.nominalUs) : y;
+  const lead = -y;
+  return fold ? foldResidual(lead, p.nominalUs) : lead;
+}
+
+/**
+ * End points of the fitted rate line for one parity, in display units (lead,
+ * µs), over `[tFrom, tTo]` of signal time. Drawn over the raw trace so the
+ * slope that encodes the rate is explicit.
+ * @param fit Joint fit of the visible points.
+ * @param parity 0 = tick line, 1 = tock line (offset by the beat error).
+ * @param tFrom Start time (s).
+ * @param tTo End time (s).
+ * @param nominalUs Nominal half-period, for the fold check.
+ * @param fold Whether the trace is folded; a line that would wrap is omitted.
+ * @returns Two `[tS, leadUs]` points, or null when the line would wrap.
+ */
+export function fitLinePoints(
+  fit: TickTockFit,
+  parity: 0 | 1,
+  tFrom: number,
+  tTo: number,
+  nominalUs: number,
+  fold: boolean,
+): [[number, number], [number, number]] | null {
+  const offset = parity === 1 ? (fit.parityOffsetUs ?? 0) : 0;
+  const at = (t: number): number => -(fit.interceptUs + offset + fit.slopeUsPerS * t);
+  const a = at(tFrom);
+  const b = at(tTo);
+  if (fold && (Math.abs(a) > nominalUs / 2 || Math.abs(b) > nominalUs / 2)) return null;
+  return [
+    [tFrom, a],
+    [tTo, b],
+  ];
 }

@@ -1,14 +1,18 @@
 <script setup lang="ts">
 /**
- * Tick-tock (paper-strip) chart: scatter of the per-beat residual `u` against
- * signal time, ticks (parity 0) and tocks (parity 1) in two colours, rejected
- * beats hollow. A new grid clears the trace (see the mechanical store).
+ * Tick-tock (paper-strip) chart: scatter of each beat's lead (`-u`, early =
+ * up) against signal time, ticks (parity 0) and tocks (parity 1) in two
+ * colours, rejected beats hollow. A new grid clears the trace (see the
+ * mechanical store).
  *
- * Modes: "Raw" plots u as the firmware reports it, so the slope shows the rate
- * like a paper chart; "Flatten" subtracts the fitted slope to show beat error
- * and noise. "Fold" wraps y at +-nominal/2 (paper-strip wrap). A readout beside
- * the chart derives rate and beat error from the plotted points as a cross-check
- * of the firmware values (rate = -slope * 0.0864, see utils/tickTock.ts).
+ * Like a conventional timegrapher strip, a gaining watch rises and a losing
+ * one falls, so the slope has the sign of the rate trend; the gap between the
+ * two lines is the beat error. In "Raw" the fitted rate lines (dashed, one per
+ * parity) are drawn over the dots. "Flatten" subtracts the fitted slope to
+ * show beat error and noise. "Fold" wraps y at +-nominal/2 (paper-strip wrap).
+ * A readout beside the chart derives rate and beat error from the plotted
+ * points as a cross-check of the firmware values (rate = slope of the plot *
+ * 0.0864, see utils/tickTock.ts).
  *
  * Redraw is throttled to 4 Hz; the accepted series use ECharts `large` mode.
  */
@@ -18,6 +22,7 @@ import type { EChartsOption } from 'echarts';
 import { useMechanicalStore } from '@/stores/mechanical';
 import { fmtFixed, fmtRate } from '@/utils/format';
 import {
+  fitLinePoints,
   fitTickTock,
   plotValueUs,
   windowStart,
@@ -109,6 +114,23 @@ function build(): Built {
     symbolSize: 6,
     itemStyle: { color: 'transparent', borderColor: color, borderWidth: 1.5 },
   });
+  /* Fitted rate lines (raw mode): the slope that encodes the rate, made explicit. */
+  const lastPt = pts[pts.length - 1];
+  const fitLine = (name: string, parity: 0 | 1, color: string) => {
+    const ends =
+      fit && !flatten.value && lastPt
+        ? fitLinePoints(fit, parity, t0, lastPt.tS, nominal, fold.value)
+        : null;
+    return {
+      name,
+      type: 'line' as const,
+      data: ends ? ends.map(([t, v]): [number, number] => [t - t0, v / 1000]) : [],
+      symbol: 'none',
+      silent: true,
+      z: 1,
+      lineStyle: { color, width: 1.5, type: 'dashed' as const, opacity: 0.8 },
+    };
+  };
   const nominalMs = nominal / 1000 || 125;
   const vals: number[] = [];
   for (const parity of [0, 1] as const) for (const d of trace(parity, true)) vals.push(d[1]);
@@ -130,7 +152,7 @@ function build(): Built {
     },
     yAxis: {
       type: 'value',
-      name: 'u (ms)',
+      name: 'early (+) / late (−), ms',
       min: yMin,
       max: yMax,
       axisLabel: {
@@ -144,6 +166,8 @@ function build(): Built {
       accepted('tock', 1, c.tock),
       rejected('tick (rejected)', 0, c.tick),
       rejected('tock (rejected)', 1, c.tock),
+      fitLine('tick rate', 0, c.tick),
+      fitLine('tock rate', 1, c.tock),
     ],
   };
   return { option, fit, shown: pts.length };
