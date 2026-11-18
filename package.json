@@ -1,0 +1,52 @@
+{
+  "name": "timegrapher-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-user web front end for the USB timegrapher stand (WebHID + JSON protocol).",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "sync-types": "node scripts/sync-types.mjs"
+  },
+  "dependencies": {
+    "@mdi/font": "^7.4.47",
+    "echarts": "^6.1.0",
+    "pinia": "^4.1.0",
+    "vue": "^3.5.45",
+    "vue-echarts": "^8.3.2",
+    "vue-router": "^5.5.1",
+    "vuetify": "^4.3.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.6",
+    "@types/w3c-web-hid": "^1.0.7",
+    "@vitejs/plugin-vue": "^6.0.11",
+    "@vitest/coverage-v8": "^5.1.1",
+    "@vue/test-utils": "^2.6.0",
+    "eslint": "^10.15.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-vue": "^10.12.1",
+    "globals": "^17.14.0",
+    "happy-dom": "^21.0.4",
+    "prettier": "^3.10.1",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.73.0",
+    "vite": "^8.3.8",
+    "vite-plugin-vuetify": "^2.1.3",
+    "vitest": "^5.1.1",
+    "vue-eslint-parser": "^10.4.2",
+    "vue-tsc": "^3.3.14"
+  }
+}
