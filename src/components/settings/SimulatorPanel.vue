@@ -93,6 +93,7 @@ interface Readout {
   faults: Faults;
   build: Build;
   attached: Attached;
+  autoAttach: boolean;
   usb: boolean;
   timeScale: number;
   latency: number;
@@ -129,6 +130,7 @@ function readAll(): void {
     faults: c.getFaults(),
     build: c.getBuild(),
     attached: c.getAttached(),
+    autoAttach: c.getAutoAttach(),
     usb: c.getUsbStreaming(),
     timeScale: c.getTimeScale(),
     latency: c.getLatencyMs(),
@@ -213,9 +215,19 @@ function f(n: number, d = 2): string {
       density="compact"
       @update:model-value="(v: Attached) => control?.setAttached(v)"
     />
+    <v-switch
+      :model-value="state.autoAttach"
+      label="Swap the watch to match the quartz mode chosen in the app"
+      hint="Off: the watch only changes here, so a mismatched mode sees no signal (wrong-watch test)."
+      persistent-hint
+      color="primary"
+      density="compact"
+      class="mb-3"
+      @update:model-value="(v: boolean | null) => control?.setAutoAttach(Boolean(v))"
+    />
 
     <div class="text-subtitle-2 mb-1">Mechanical watch</div>
-    <v-row dense>
+    <v-row density="compact">
       <v-col cols="12" sm="6" md="4">
         <v-select
           :model-value="state.mech.vph"
@@ -240,7 +252,7 @@ function f(n: number, d = 2): string {
     </v-row>
 
     <div class="text-subtitle-2 mb-1">Quartz source</div>
-    <v-row dense>
+    <v-row density="compact">
       <v-col v-for="fl in QSRC_FIELDS" :key="fl.key" cols="12" sm="6" md="4">
         <v-text-field
           :model-value="state.qsrc[fl.key]"
@@ -284,7 +296,7 @@ function f(n: number, d = 2): string {
         Cold start
       </v-btn>
     </div>
-    <v-row dense>
+    <v-row density="compact">
       <v-col v-for="fl in GPS_FIELDS" :key="fl.key" cols="12" sm="6" md="4">
         <v-text-field
           :model-value="state.gps[fl.key]"
@@ -301,7 +313,7 @@ function f(n: number, d = 2): string {
     </v-row>
 
     <div class="text-subtitle-2 mb-1">Board crystal</div>
-    <v-row dense>
+    <v-row density="compact">
       <v-col v-for="fl in TB_FIELDS" :key="fl.key" cols="12" sm="6" md="4">
         <v-text-field
           :model-value="state.tb[fl.key]"

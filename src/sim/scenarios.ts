@@ -48,6 +48,8 @@ export interface BuildOptions {
 /** Physical settings remembered between connections. */
 export interface SimulatorSettings {
   attached: WatchKind;
+  /** The stand swaps the watch to match the selected quartz mode. */
+  autoAttach: boolean;
   mechanical: MechanicalParams;
   quartzSource: QuartzSourceParams;
   gps: GpsSimParams;
@@ -121,6 +123,15 @@ export interface SimulatorControl {
   getAttached(): WatchKind;
   /** Puts a different watch on the stand. */
   setAttached(kind: WatchKind): void;
+  /** @returns Whether the watch follows the quartz mode the app selects. */
+  getAutoAttach(): boolean;
+  /**
+   * Turns watch auto-swap on or off. On (default): selecting motor / LCD /
+   * fork in the app puts that kind of watch on the stand, and mechanical puts
+   * the mechanical watch back. Off: the watch only changes here, so a mode
+   * that does not match the attached watch sees no signal (wrong-watch test).
+   */
+  setAutoAttach(on: boolean): void;
   /** @returns The background noise floor (float full scale). */
   getNoiseFloor(): number;
   /** Sets the background noise floor. */
@@ -268,6 +279,7 @@ export function getPersistedSettings(): SimulatorSettings | undefined {
 export function settingsToOptions(s: SimulatorSettings): VirtualDeviceOptions {
   return {
     attached: s.attached,
+    autoAttach: s.autoAttach,
     mechanical: s.mechanical,
     quartzSource: s.quartzSource,
     gpsParams: s.gps,
@@ -334,7 +346,7 @@ export function createSimulatorControl(
               motorStepS: 1,
               inhibitionPeriodS: 60,
               inhibitionJumpUs: 488.28,
-              motorSnr: 15.8,
+              motorSnr: 50,
             };
             mode('motor');
             break;
@@ -393,6 +405,10 @@ export function createSimulatorControl(
     getAttached: () => device.attached,
     setAttached: (k) => {
       changed(() => void (device.attached = k));
+    },
+    getAutoAttach: () => device.autoAttach,
+    setAutoAttach: (on) => {
+      changed(() => void (device.autoAttach = on));
     },
     getNoiseFloor: () => device.noiseFloor,
     setNoiseFloor: (v) => {
@@ -480,6 +496,7 @@ export function createSimulatorControl(
     },
     exportSettings: () => ({
       attached: device.attached,
+      autoAttach: device.autoAttach,
       mechanical: { ...device.mechanical.params },
       quartzSource: { ...device.quartz.source },
       gps: { ...device.gps.params },

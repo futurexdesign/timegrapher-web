@@ -31,7 +31,8 @@ function build(): EChartsOption {
       type: 'value',
       name: 's',
       min: 'dataMin',
-      axisLabel: axis,
+      /* 'dataMin' puts the raw first-pulse time on the first tick. */
+      axisLabel: { ...axis, formatter: (v: number) => String(Math.round(v)), hideOverlap: true },
       splitLine: { lineStyle: { color: c.grid } },
     },
     yAxis: {

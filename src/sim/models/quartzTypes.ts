@@ -51,7 +51,8 @@ export const DEFAULT_QUARTZ_SOURCE: QuartzSourceParams = {
   inhibitionPhaseS: 23,
   motorJitterUs: 1.65,
   polarityOffsetUs: 0.12,
-  motorSnr: 15.8,
+  /* A well-placed watch; the firmware's weak-signal hint starts at SNR 16. */
+  motorSnr: 50,
   motorNoiseSigma: 9900,
   motorClipped: false,
   motorExtraProb: 0,

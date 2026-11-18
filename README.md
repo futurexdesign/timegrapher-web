@@ -92,6 +92,12 @@ the `SimulatorControl` API of `src/sim`.
   (satellite count, time to fix, first sentence); board crystal error and
   drift; noise floor; time scale (time acceleration) and reply latency;
   simulated USB audio stream open / closed.
+- **Watch follows the mode** (on by default): choosing Motor, LCD or Fork on
+  the Time Grapher puts that kind of watch on the simulated stand, and
+  Mechanical puts the mechanical watch back, so every mode measures without a
+  trip to this panel. Turn it off to test a mismatch: the watch then changes
+  only here, and a mode that does not match it sees no signal, as on a real
+  stand with the wrong watch on it.
 - **Fault injection**: flags `timebaseUnverified`, `unsupportedRate`,
   `flashBusy`, `flashError`, `backendUnhealthy`; fail the next N requests with
   a chosen error; log a DSP fault (block plus `underrun` / `usbStall` /

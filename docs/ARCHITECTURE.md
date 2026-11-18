@@ -143,6 +143,12 @@ cancels pending writes through a generation counter.
   `notifier.ts` holds subscription state and periodic scheduling; `rings.ts`
   the event / error / beat logs; `dspState.ts` the `getState` / `patchState`
   merge semantics.
+- The device models which watch is on the stand (`attached`); a quartz mode
+  measures only when the matching kind is attached. With `autoAttach` (default
+  on), a mode selected through `patchState` swaps the attached watch to match
+  (`followMode`), so the app works without the Simulator panel. Turning it off
+  in the panel models a wrong watch on the stand. See
+  `src/sim/quartzModes.test.ts`.
 - `scenarios.ts`: the `SimulatorControl` API (presets, physics setters, faults,
   failure injection, time scale, build options, snapshot) and the module-level
   registry of the active control. The transport registers its control on

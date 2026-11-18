@@ -36,6 +36,7 @@ import type {
   HidSubscription,
   OpName,
   PipelineNode,
+  QuartzMode,
   RequestOf,
   ResultOf,
   Timebase,
@@ -114,6 +115,12 @@ export interface VirtualDeviceOptions {
   runRequested?: boolean;
   /** Watch on the stand (default `mechanical`). */
   attached?: WatchKind;
+  /**
+   * Swap the watch on the stand to match the quartz mode the app selects
+   * (default true). Off = the attached watch only changes through the
+   * simulator control, which models putting the wrong watch on the stand.
+   */
+  autoAttach?: boolean;
   /** Simulated seconds per real second (default 1). */
   timeScale?: number;
   /** Cap on signal-model speed-up (default 20). */
@@ -199,6 +206,8 @@ export class VirtualDevice {
   };
   /** The watch physically on the stand. */
   attached: WatchKind;
+  /** Follow the selected quartz mode with the attached watch (see options). */
+  autoAttach: boolean;
   /** Simulated seconds per real second. */
   timeScale: number;
   /** Cap on signal-model speed-up. */
@@ -260,6 +269,7 @@ export class VirtualDevice {
     this.hasGps = options.gps ?? true;
     this.hasPps = options.pps ?? true;
     this.attached = options.attached ?? 'mechanical';
+    this.autoAttach = options.autoAttach ?? true;
     this.timeScale = options.timeScale ?? 1;
     this.signalScaleMax = options.signalScaleMax ?? 20;
     this.noiseFloor = options.noiseFloor ?? 1.5e-4;
@@ -276,6 +286,7 @@ export class VirtualDevice {
       settings: () => this.quartz.settings(),
       setMode: (m) => {
         this.quartz.setMode(m);
+        this.followMode(m);
       },
       setParam: (n, v) => this.quartz.setParam(n, v),
     });
@@ -435,6 +446,22 @@ export class VirtualDevice {
       this.advanceSignal(span);
     }
     this.logFlushPoll(now);
+  }
+
+  /**
+   * With {@link autoAttach}, puts the watch that matches `mode` on the stand:
+   * the quartz kind for a quartz mode, a mechanical watch for `mechanical`
+   * (only when a quartz watch was attached, so `none` stays `none`). This is
+   * what a user does with the real stand when they pick a mode.
+   * @param mode Quartz mode just selected through the protocol.
+   */
+  private followMode(mode: QuartzMode): void {
+    if (!this.autoAttach) return;
+    if (mode !== 'mechanical') {
+      this.attached = mode;
+    } else if (this.attached === 'motor' || this.attached === 'lcd' || this.attached === 'fork') {
+      this.attached = 'mechanical';
+    }
   }
 
   private afterRunChange(): void {
