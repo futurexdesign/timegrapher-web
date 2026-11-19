@@ -28,7 +28,10 @@ history (`#/`, `#/audio`, `#/timebase`, `#/settings`).
     chart plots each beat's lead (early = up), so like a conventional
     timegrapher a gaining watch's trace rises and its slope matches the rate
     trend; dashed fitted lines show that slope, and the gap between the tick
-    and tock lines is the beat error.
+    and tock lines is the beat error. Its time axis is fixed to the selected
+    window (30 s, 2 min, 10 min): it fills from the left, then pages forward
+    in sixths of the window, so the slope reads the same at any point in a
+    run. "All" spans the whole recording.
   - _Quartz_: headline rate (motor: with inhibition; LCD / fork: oscillator
     rate), raw and uncalibrated rates, state and reason, motor inhibition, gate
     selector, fork frequency, SNR / clipping hints and the motor pulse chart.

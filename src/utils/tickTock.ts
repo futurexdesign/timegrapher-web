@@ -286,3 +286,26 @@ export function fitLinePoints(
     [tTo, b],
   ];
 }
+
+/**
+ * Fixed x-axis span for the selected time window, in seconds since the first
+ * beat of the grid. The axis always covers exactly `windowS` (no scaling to the
+ * data): while less than a window of beats exists it runs `0..windowS` and the
+ * trace fills it from the left. After that it advances in whole steps of
+ * `windowS / 6`, like a chart recorder paging, so the tick marks stay on round
+ * values and the newest beat is always within one step of the right edge.
+ * An infinite window ("All") spans the recorded data.
+ * @param elapsedS Seconds from the grid's first beat to its newest beat (>= 0).
+ * @param windowS Selected window (s), or Infinity for all.
+ * @returns Axis bounds in elapsed seconds, and the tick step (null for "All").
+ */
+export function xWindow(
+  elapsedS: number,
+  windowS: number,
+): { min: number; max: number; step: number | null } {
+  const last = Math.max(0, elapsedS);
+  if (!Number.isFinite(windowS)) return { min: 0, max: Math.max(last, 1), step: null };
+  const step = windowS / 6;
+  const min = last <= windowS ? 0 : Math.ceil((last - windowS) / step) * step;
+  return { min, max: min + windowS, step };
+}

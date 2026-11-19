@@ -9,6 +9,7 @@ import {
   rateToSlopeUsPerS,
   slopeToRateSDay,
   windowStart,
+  xWindow,
   type TickPoint,
 } from './tickTock';
 
@@ -131,5 +132,32 @@ describe('plotValueUs / windowStart', () => {
     expect(windowStart(pts, 0)).toBe(0);
     expect(windowStart(pts, 1)).toBe(8);
     expect(windowStart(pts, 1e6)).toBe(100);
+  });
+});
+
+describe('xWindow', () => {
+  it('spans exactly the window from 0 while the data is shorter', () => {
+    expect(xWindow(0, 120)).toEqual({ min: 0, max: 120, step: 20 });
+    expect(xWindow(9.5, 120)).toEqual({ min: 0, max: 120, step: 20 });
+    expect(xWindow(120, 120)).toEqual({ min: 0, max: 120, step: 20 });
+  });
+  it('then pages in whole steps: exact span, round ticks, newest beat in view', () => {
+    for (const [elapsed, win] of [
+      [34, 30],
+      [35, 30],
+      [500.3, 120],
+      [3601, 600],
+    ] as const) {
+      const r = xWindow(elapsed, win);
+      expect(r.max - r.min).toBeCloseTo(win, 9);
+      expect(r.min % (win / 6)).toBeCloseTo(0, 9);
+      expect(elapsed).toBeLessThanOrEqual(r.max);
+      expect(elapsed).toBeGreaterThan(r.max - win / 6 - 1e-9);
+    }
+    expect(xWindow(34, 30)).toEqual({ min: 5, max: 35, step: 5 });
+  });
+  it('"All" spans the recorded data', () => {
+    expect(xWindow(3600, Number.POSITIVE_INFINITY)).toEqual({ min: 0, max: 3600, step: null });
+    expect(xWindow(0, Number.POSITIVE_INFINITY)).toEqual({ min: 0, max: 1, step: null });
   });
 });

@@ -26,6 +26,7 @@ import {
   fitTickTock,
   plotValueUs,
   windowStart,
+  xWindow,
   type TickPoint,
   type TickTockFit,
 } from '@/utils/tickTock';
@@ -85,7 +86,10 @@ function build(): Built {
   const first = last ? windowStart(all, last.tS - windowS.value) : 0;
   const pts: TickPoint[] = all.slice(first);
   const fit = fitTickTock(pts);
-  const t0 = pts[0]?.tS ?? 0;
+  /* x = seconds since the grid's first beat, so axis labels stay put as the
+   * window scrolls; the axis span is fixed by the selected window (xWindow). */
+  const t0 = all[0]?.tS ?? 0;
+  const xr = xWindow(last ? last.tS - t0 : 0, windowS.value);
   const c = colors.value;
   const nominal = pts[0]?.nominalUs ?? 0;
   const trace = (parity: 0 | 1, accepted: boolean): [number, number][] => {
@@ -118,8 +122,8 @@ function build(): Built {
   const lastPt = pts[pts.length - 1];
   const fitLine = (name: string, parity: 0 | 1, color: string) => {
     const ends =
-      fit && !flatten.value && lastPt
-        ? fitLinePoints(fit, parity, t0, lastPt.tS, nominal, fold.value)
+      fit && !flatten.value && lastPt && pts[0]
+        ? fitLinePoints(fit, parity, pts[0].tS, lastPt.tS, nominal, fold.value)
         : null;
     return {
       name,
@@ -145,9 +149,15 @@ function build(): Built {
       type: 'value',
       name: 's',
       nameLocation: 'end',
-      min: 'dataMin',
-      max: 'dataMax',
-      axisLabel: { color: c.text },
+      min: xr.min,
+      max: xr.max,
+      /* Six even divisions of the window (5 s for 30 s, 20 s for 2 min, …). */
+      ...(xr.step !== null ? { interval: xr.step } : {}),
+      axisLabel: {
+        color: c.text,
+        hideOverlap: true,
+        formatter: (v: number) => String(Math.round(v)),
+      },
       splitLine: { lineStyle: { color: c.grid } },
     },
     yAxis: {
@@ -156,6 +166,9 @@ function build(): Built {
       min: yMin,
       max: yMax,
       axisLabel: {
+        /* Auto-fit bounds are arbitrary values; label only the even ticks. */
+        showMinLabel: scale.value !== 'auto',
+        showMaxLabel: scale.value !== 'auto',
         color: c.text,
         formatter: (v: number) => (Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(2)),
       },
