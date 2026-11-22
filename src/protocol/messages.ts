@@ -13,6 +13,7 @@ const ERROR_CODES: readonly string[] = [
   'tooLarge',
   'busy',
   'flashError',
+  'linkBusy',
   'internal',
 ] satisfies HidErrorCode[];
 

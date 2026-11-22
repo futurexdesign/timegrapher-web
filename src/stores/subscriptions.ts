@@ -26,11 +26,25 @@ import { computed, ref, watch } from 'vue';
 import { defineStore } from 'pinia';
 import type { HidSubscribePatch, HidSubscription, NotifyOp } from '@/protocol/types';
 import type { HidNotifyDataMap } from '@/protocol/timegrapher_hid';
+import type { TransportKind } from '@/transport/Transport';
 import { useConnectionStore } from './connection';
 import { useSnackbarStore } from './snackbar';
 
 /** Rate fields of {@link HidSubscription} (merged by maximum). */
 const RATE_KEYS = ['metricsHz', 'beatHz', 'timingHz', 'quartzHz'] as const;
+/**
+ * Highest push rates (Hz) the app requests per link kind (BLE_TRANSPORT_PLAN.md
+ * §6.3). BLE carries fewer frames per second than USB HID; the `webble` row is
+ * provisional until hardware measurement HW-07 and is the one place to retune.
+ * Kinds without a row (the simulator) are not clamped.
+ */
+export const LINK_RATE_CAPS: Readonly<
+  Partial<Record<TransportKind, Readonly<Record<(typeof RATE_KEYS)[number], number>>>>
+> = {
+  webhid: { metricsHz: 20, beatHz: 5, timingHz: 5, quartzHz: 5 },
+  webble: { metricsHz: 10, beatHz: 2, timingHz: 2, quartzHz: 2 },
+};
+
 /** Flag fields of {@link HidSubscription} (merged by OR). */
 const FLAG_KEYS = ['events', 'errors', 'quartzPulses', 'beats'] as const;
 
@@ -63,6 +77,20 @@ export function mergeClaims(claims: Iterable<HidSubscribePatch>): HidSubscriptio
     for (const k of RATE_KEYS) out[k] = Math.max(out[k], c[k] ?? 0);
     for (const k of FLAG_KEYS) out[k] = Boolean(out[k]) || Boolean(c[k]);
   }
+  return out;
+}
+
+/**
+ * Limits the rates of `sub` to {@link LINK_RATE_CAPS} for a link kind.
+ * @param sub Merged subscription.
+ * @param kind Active link kind, or `null` when disconnected.
+ * @returns `sub` itself when the kind has no caps, else a clamped copy.
+ */
+export function clampToLink(sub: HidSubscription, kind: TransportKind | null): HidSubscription {
+  const caps = kind === null ? undefined : LINK_RATE_CAPS[kind];
+  if (caps === undefined) return sub;
+  const out: HidSubscription = { ...sub };
+  for (const k of RATE_KEYS) out[k] = Math.min(out[k], caps[k]);
   return out;
 }
 
@@ -102,8 +130,8 @@ export const useSubscriptionsStore = defineStore('subscriptions', () => {
   const claims = ref(new Map<string, HidSubscribePatch>());
   /** What the device last echoed (authoritative, includes firmware clamping). */
   const active = ref<HidSubscription>({ ...QUIET });
-  /** Desired merged subscription. */
-  const desired = computed(() => mergeClaims(claims.value.values()));
+  /** Desired merged subscription, clamped to what the link can carry. */
+  const desired = computed(() => clampToLink(mergeClaims(claims.value.values()), connection.kind));
 
   const handlers = new Map<NotifyOp, Set<(data: unknown) => void>>();
   let offNotify: (() => void) | null = null;
@@ -222,6 +250,16 @@ export const useSubscriptionsStore = defineStore('subscriptions', () => {
       void sync();
     },
     { immediate: true },
+  );
+
+  /* A takeover reset the device's subscription: forget the echo and re-send everything. */
+  watch(
+    () => connection.ownershipEpoch,
+    () => {
+      active.value = { ...QUIET };
+      stopRetry();
+      void sync();
+    },
   );
 
   return { claims, active, desired, claim, release, on, sync };

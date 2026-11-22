@@ -2,8 +2,9 @@
 
 End-user web front end for the USB **timegrapher stand**, a watch timing
 device. The app talks to the device over
-[WebHID](https://developer.mozilla.org/en-US/docs/Web/API/WebHID_API) using a
-framed JSON protocol. The firmware repo (`timegrapher-stand`) is the **source
+[WebHID](https://developer.mozilla.org/en-US/docs/Web/API/WebHID_API) (USB) or
+[Web Bluetooth](https://developer.mozilla.org/en-US/docs/Web/API/Web_Bluetooth_API)
+(BLE) using a framed JSON protocol. The firmware repo (`timegrapher-stand`) is the **source
 of truth** for the protocol: the normative spec is `docs/HID_CONTROL_PLANE.md`
 there. A built-in **virtual device** (simulator, `src/sim`) lets you use and
 develop the UI without hardware.
@@ -76,12 +77,86 @@ Use the **Connect** menu in the app bar (or the buttons on the connect prompt):
   page `0xFFA0` / usage `0x0001`), then sends `hello`. Disabled when the
   browser has no WebHID. It has not been run against real hardware yet (see
   Known limitations).
+- **Real device (Bluetooth)**: connects over BLE. See
+  [Connecting over Bluetooth](#connecting-over-bluetooth).
 - **Virtual device**: an in-browser simulation of the protocol surface. Nothing
   to plug in; it behaves like a stand with a watch on it.
 
-Both implement the same `Transport` interface, so every view works unchanged.
-Features are gated on `hello.caps` (`useConnectionStore().features`):
+All three implement the same `Transport` interface, so every view works
+unchanged. Features are gated on `hello.caps` (`useConnectionStore().features`):
 unsupported features are hidden, not reported as errors.
+
+## Connecting over Bluetooth
+
+The stand also serves the control protocol over Bluetooth Low Energy (BLE). The
+app uses Web Bluetooth for it. Views, features and commands are the same as over
+USB. Audio still travels over USB only: Bluetooth carries control JSON.
+
+The stand advertises as `TG-XXXX`, where `XXXX` is the last two bytes of its
+Bluetooth address in upper-case hex (for example `TG-1A2B`). The OLED shows the
+same name, so you can tell several stands apart in the browser's chooser.
+
+### Desktop Chrome or Edge
+
+1. Power the stand and turn Bluetooth on for the computer.
+2. Open the app over HTTPS or `http://localhost`.
+3. Open the **Connect** menu in the app bar, or use the connect prompt, and
+   choose **Real device (Bluetooth)**.
+4. Select `TG-XXXX` in the browser's chooser.
+
+No pairing is needed: do not pair the stand in the operating system's Bluetooth
+settings. If the chooser stays empty, check that Bluetooth is on and that the
+browser may use it (on macOS: System Settings > Privacy & Security > Bluetooth).
+
+### Android Chrome
+
+1. Power the stand and turn Bluetooth on for the phone.
+2. Open the app in Chrome and choose **Real device (Bluetooth)** from the
+   **Connect** menu or the connect prompt.
+3. Allow the nearby-devices (or location) permission when Chrome asks.
+4. Select `TG-XXXX` in the chooser.
+
+The **Real device (WebHID)** entry is greyed out, as Android Chrome has no
+WebHID.
+
+### iPad and iPhone (Bluefy)
+
+Safari and Chrome on iPhone and iPad cannot use Web Bluetooth. Use Bluefy, a
+Web Bluetooth browser from the App Store.
+
+1. Install Bluefy and turn Bluetooth on.
+2. In Safari or Chrome, open the app and tap **Copy link** on the connect
+   prompt. Paste the address into Bluefy and open it there.
+3. In Bluefy, choose **Real device (Bluetooth)** and select `TG-XXXX`.
+4. Keep Bluefy in the foreground while you use the app.
+
+### When another app holds control
+
+The stand gives control to one host at a time, over USB or Bluetooth. If you
+connect while another app controls the stand, the app shows **Stand in use**:
+"This stand is being controlled over USB (or Bluetooth) by another app. Take
+over?"
+
+- **Take over** takes control from that app. The other app loses control and
+  its subscriptions stop.
+- **Cancel** disconnects and leaves the other app in control.
+
+If another app takes control while you are connected, the app disconnects and
+shows a warning that control was taken over. While the app is open and idle it
+sends a keepalive `ping` every 3 s, so it keeps control.
+
+### Limits
+
+- **Foreground only on iOS.** Bluefy stops the connection when it leaves the
+  foreground. Keep it open and in front.
+- **One BLE host at a time.** The stand accepts one Bluetooth connection, and
+  only one link holds control.
+- **No pairing or encryption.** The link uses no security, so anyone in radio
+  range can connect and take control. Use it on a bench, not on a shared network.
+- **MTU of at least 66 bytes is required.** Each control frame is up to 63 bytes
+  and needs an ATT MTU of 66. If the browser or OS negotiates less, the app
+  refuses the connection and shows `BLE link MTU <n> is below 66`.
+- Bluetooth has not yet been run against real hardware (see Known limitations).
 
 ## Simulator
 
@@ -172,8 +247,10 @@ it can be hosted from any static path.
 
 ## Browser requirements
 
-- A Chromium-based browser (Chrome, Edge, Opera) for a real device. Firefox and
-  Safari have no WebHID; the virtual device still works there.
+- A Chromium-based browser (Chrome, Edge, Opera) for a real device over USB.
+  Firefox and Safari have no WebHID; the virtual device still works there.
+- For a real device over Bluetooth: Chrome or Edge (desktop or Android), or
+  Bluefy on iPhone and iPad. Safari and iOS Chrome have no Web Bluetooth.
 - A **secure context**: HTTPS, or `http://localhost`.
 - On Linux you may need a udev rule granting access to the hidraw device.
 - Optional: the Screen Wake Lock API keeps the screen on during a PC-assisted
@@ -207,7 +284,8 @@ scripts/sync-types.mjs      protocol type sync
 src/
   main.ts, App.vue          entry and root component (v-app, global snackbar, theme)
   protocol/                 timegrapher_hid.d.ts (synced), types, constants, framer, messages
-  transport/                Transport interface + DeviceError, WebHidTransport
+  transport/                Transport interface + DeviceError, FramedTransport (base),
+                            WebHidTransport, WebBleTransport
   sim/                      virtual device: VirtualTransport, VirtualDevice, scenarios
                             (SimulatorControl), notifier, rings, clock, rng, models/
   stores/                   Pinia: connection, subscriptions, snackbar, theme, device,
@@ -259,7 +337,7 @@ above 2030 bytes are refused client-side (`protocol` error) because the device
 drops them silently; `hello.protocolVersion` other than 1 only shows a warning.
 
 - `connection`: active transport, status, `hello`, caps and derived `features`;
-  `connect('webhid' | 'virtual')`.
+  `connect('webhid' | 'webble' | 'virtual')`.
 - `subscriptions`: claim merge, diff-only `subscribe`, notify bus (`on`).
 - `snackbar`: global error / notice messages.
 - `theme`: light / dark / system preference (`localStorage`).
@@ -279,8 +357,8 @@ drops them silently; `hello.protocolVersion` other than 1 only shows a warning.
 
 ## Known limitations
 
-- **No run against real hardware yet.** `WebHidTransport` is covered by unit
-  tests with fake devices only; the contract suite runs against the simulator
+- **No run against real hardware yet.** `WebHidTransport` and
+  `WebBleTransport` are covered by unit tests with fake devices only; the contract suite runs against the simulator
   only, and `test:device` does not exist.
 - The simulator mirrors the firmware docs, not the firmware itself, so
   simulator-only behaviour can differ from a real stand.

@@ -39,3 +39,16 @@ export const HID_PROTOCOL_VERSION = 1;
 
 /** `navigator.hid.requestDevice` filter (§2.1). */
 export const HID_DEVICE_FILTER = { usagePage: HID_USAGE_PAGE, usage: HID_USAGE } as const;
+
+/** BLE control service UUID (BLE_CONTROL_PLANE.md §4.1). Lowercase, as Web Bluetooth requires. */
+export const BLE_SERVICE_UUID = 'c137e7c0-92b4-4d9e-87e0-9ba757169016';
+/** RX characteristic (host to device): one frame per ATT write. */
+export const BLE_RX_UUID = 'c137e7c1-92b4-4d9e-87e0-9ba757169016';
+/** TX characteristic (device to host): one frame per notification. */
+export const BLE_TX_UUID = 'c137e7c2-92b4-4d9e-87e0-9ba757169016';
+/** INFO characteristic: UTF-8 JSON link description (`p`, `mtu`, `fmax`, `seg`). */
+export const BLE_INFO_UUID = 'c137e7c3-92b4-4d9e-87e0-9ba757169016';
+/** Advertised local-name prefix (`TG-XXXX`), used as a scan filter alternative (§4.2). */
+export const BLE_NAME_PREFIX = 'TG-';
+/** Smallest ATT MTU that carries a full 63-byte frame (63 + 3 bytes ATT header = 66). */
+export const BLE_MIN_MTU = 66;

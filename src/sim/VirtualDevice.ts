@@ -28,8 +28,12 @@ import type {
   DspError,
   DspEvent,
   DspFaultReason,
+  HidDiag,
   HidHelloCaps,
+  HidHelloControl,
+  HidHelloLink,
   HidHelloResult,
+  HidLinkKind,
   HidNotify,
   HidSubscribePatch,
   GpsInfo,
@@ -135,7 +139,18 @@ export interface VirtualDeviceOptions {
   timebase?: Partial<TimebaseSimParams>;
   /** Background noise floor (float full scale). */
   noiseFloor?: number;
+  /**
+   * Link this device pretends to be reached over (default `usbHid`). It fills
+   * `hello.link`, `hello.control.owner` and the `claim` / `getLink` results.
+   * Ownership follows §4.7; a second host is modelled by {@link VirtualDevice.setForeignOwner}.
+   */
+  linkKind?: HidLinkKind;
+  /** ATT MTU reported in `hello.link.mtu` when `linkKind` is `ble` (default 185). */
+  linkMtu?: number;
 }
+
+/** Control lease length (ms, §4.7). */
+const LEASE_MS = 10000;
 
 /** Longest signal span simulated per advance (s); beyond this time is dropped. */
 const MAX_SIGNAL_SPAN_S = 300;
@@ -236,6 +251,9 @@ export class VirtualDevice {
   readonly caps: HidHelloCaps;
 
   private readonly clock: Clock;
+  /** Link the requests arrive on. */
+  private readonly linkKind: HidLinkKind;
+  private readonly linkMtu: number;
   private readonly rng: Rng;
   private readonly hasQuartz: boolean;
   private readonly hasGps: boolean;
@@ -254,7 +272,15 @@ export class VirtualDevice {
   private readonly events = new NumberedRing<DspEvent>(EVENT_RING);
   private readonly errors = new NumberedRing<DspError>(ERROR_RING);
   private readonly beats = new NumberedRing<DspBeat>(BEAT_RING);
-  private readonly subscription: SubscriptionState;
+  /** Replaced by a fresh instance on a takeover (the firmware's `ControlHandler::reset()`). */
+  private subscription: SubscriptionState;
+  private readonly subscriptionCaps: RateCaps;
+  /** Control owner (§4.7): `null` = none, {@link linkKind} = this link, else a foreign link. */
+  private owner: HidLinkKind | null = null;
+  /** Monotonic ms at which the owner's lease runs out. */
+  private leaseDeadlineMs = 0;
+  /** A `controlReleased` notify waiting for the next poll (foreign takeover). */
+  private pendingRelease: HidLinkKind | null = null;
   private eventCursor = 0;
   private errorCursor = 0;
   private beatCursor = 0;
@@ -264,6 +290,8 @@ export class VirtualDevice {
   /** @param options Construction options. */
   constructor(options: VirtualDeviceOptions = {}) {
     this.clock = options.clock ?? performanceClock;
+    this.linkKind = options.linkKind ?? 'usbHid';
+    this.linkMtu = options.linkMtu ?? 185;
     this.rng = createRng(options.seed ?? 1);
     this.hasQuartz = options.quartz ?? true;
     this.hasGps = options.gps ?? true;
@@ -306,6 +334,7 @@ export class VirtualDevice {
       quartz: this.hasQuartz,
       beats: true,
     };
+    this.subscriptionCaps = rateCaps;
     this.subscription = new SubscriptionState(rateCaps);
     this.caps = {
       maxJsonBytes: 2048,
@@ -334,7 +363,37 @@ export class VirtualDevice {
 
   /** @returns `true` while a subscription needs notify polling. */
   get wantsPolling(): boolean {
-    return this.subscription.active;
+    return this.subscription.active || this.pendingRelease !== null;
+  }
+
+  /**
+   * Scenario hook: another host (on the other link) takes or releases control.
+   *
+   * With a kind, that link becomes the owner with a fresh lease. When this
+   * link held control, its subscription is cleared (the firmware's handler
+   * reset) and a `controlReleased` notify is queued for the next poll, so
+   * notify delivery needs an active poll loop (any active subscription).
+   * Later requests other than `hello` / `ping` fail with `linkBusy` until
+   * this link claims with `takeover: true` or the lease runs out. With
+   * `null`, a foreign owner is dropped and control is free again; ownership by
+   * this link is untouched.
+   * @param kind Link that now owns control, or `null`.
+   * @throws {RangeError} when `kind` is this device's own link.
+   */
+  setForeignOwner(kind: HidLinkKind | null): void {
+    if (kind === null) {
+      if (this.owner !== this.linkKind) this.owner = null;
+      return;
+    }
+    if (kind === this.linkKind) {
+      throw new RangeError('foreign owner must differ from the device link');
+    }
+    if (this.owner === this.linkKind) {
+      this.subscription = new SubscriptionState(this.subscriptionCaps);
+      this.pendingRelease = kind;
+    }
+    this.owner = kind;
+    this.leaseDeadlineMs = this.clock() + LEASE_MS;
   }
 
   /** @returns Simulated wall-clock seconds since power-up. */
@@ -629,6 +688,11 @@ export class VirtualDevice {
    */
   pollNotify(): HidNotify | null {
     this.advance();
+    if (this.pendingRelease !== null) {
+      const to = this.pendingRelease;
+      this.pendingRelease = null;
+      return { v: 1, notify: true, op: 'controlReleased', data: { to } };
+    }
     const now = this.clock();
     const kind = this.subscription.nextDue(now);
     if (kind !== null) {
@@ -706,6 +770,7 @@ export class VirtualDevice {
    */
   handle<O extends OpName>(op: O, body: RequestOf<O>): ResultOf<O> {
     this.advance();
+    this.arbitrate(op, body);
     const inj = this.failure;
     if (inj && inj.remaining > 0 && (inj.op === undefined || inj.op === op)) {
       inj.remaining--;
@@ -721,6 +786,11 @@ export class VirtualDevice {
 
   private readonly handlers: { [O in OpName]: (body: RequestOf<O>) => ResultOf<O> } = {
     hello: () => this.hello(),
+    // `claim` itself is resolved in `arbitrate()`, which has already made this
+    // link the owner (or thrown `linkBusy`) by the time the handler runs.
+    claim: () => ({ owner: this.linkKind, previous: this.claimPrevious }),
+    getLink: () => ({ usbHid: { mounted: true }, control: this.controlState() }),
+    getDiag: () => this.diag(),
     // `t` is echoed verbatim when it is an integer within int64, else treated as missing (0).
     ping: (b) => ({
       t: typeof b.t === 'number' && Number.isInteger(b.t) && Math.abs(b.t) < 2 ** 63 ? b.t : 0,
@@ -825,6 +895,104 @@ export class VirtualDevice {
       vid: 51966,
       pid: 16387,
       caps: structuredClone(this.caps),
+      link: this.helloLink(),
+      control: this.controlState(),
+    };
+  }
+
+  /** The `hello.link` object: kind, plus the MTU on BLE. */
+  private helloLink(): HidHelloLink {
+    return this.linkKind === 'ble' ? { kind: 'ble', mtu: this.linkMtu } : { kind: 'usbHid' };
+  }
+
+  /** Ownership as seen by the requesting link (`hello.control`, §4.6). */
+  private controlState(): HidHelloControl {
+    return { owner: this.owner, self: this.owner === this.linkKind, leaseMs: LEASE_MS };
+  }
+
+  /** Owner before the last `claim` (its `previous` result field). */
+  private claimPrevious: HidLinkKind | null = null;
+
+  /**
+   * Applies the ownership table of §4.7 to one request arriving on this link.
+   * `hello` is always answered; `ping` also refreshes the lease when this link
+   * owns control. `claim` and every other op take control when it is free,
+   * already ours or the lease has expired, and otherwise fail with `linkBusy`
+   * (`claim` with `takeover: true` always succeeds).
+   * @param op Requested op.
+   * @param body Request fields (only `claim`'s `takeover` is read).
+   * @throws {DeviceError} `linkBusy` while a foreign link holds control.
+   */
+  private arbitrate(op: OpName, body: object): void {
+    const now = this.clock();
+    if (op === 'hello') return;
+    if (op === 'ping') {
+      if (this.owner === this.linkKind) this.leaseDeadlineMs = now + LEASE_MS;
+      return;
+    }
+    const foreign = this.owner !== null && this.owner !== this.linkKind;
+    const held = foreign && now < this.leaseDeadlineMs;
+    const takeover = op === 'claim' && (body as { takeover?: unknown }).takeover === true;
+    if (held && !takeover) {
+      throw new DeviceError('linkBusy', `control held by ${String(this.owner)}`, op);
+    }
+    if (foreign) this.subscription = new SubscriptionState(this.subscriptionCaps);
+    this.claimPrevious = this.owner;
+    this.owner = this.linkKind;
+    this.leaseDeadlineMs = now + LEASE_MS;
+  }
+
+  /** `getDiag` result: the simulator has no fault counters, so every field is 0. */
+  private diag(): HidDiag {
+    return {
+      usbEnumerationCount: 0,
+      usbAudioStreamOpenCount: 0,
+      usbAudioStreamCloseCount: 0,
+      usbSuspendCount: 0,
+      usbResumeCount: 0,
+      boostOnCount: 0,
+      boostOffCount: 0,
+      preampSettleStartCount: 0,
+      preampSettleDoneCount: 0,
+      preampStartAbortedCount: 0,
+      usbSuspendDurationMs: 0,
+      adcTotalSampleCount: 0,
+      adcConversionErrorCount: 0,
+      dmaCompleteCount: 0,
+      dmaOverrunCount: 0,
+      pcmRingUnderrunCount: 0,
+      pcmRingOverrunCount: 0,
+      usbInPacketCount: 0,
+      usbInSampleCount: 0,
+      usbShortWriteCount: 0,
+      ringMinOccupancy: 0,
+      ringMaxOccupancy: 0,
+      adcMinCode: 0,
+      adcMaxCode: 0,
+      adcMeanCodeAccum: 0,
+      adcMeanCodeCount: 0,
+      adcDcCounts: 0,
+      adcAcPeakCounts: 0,
+      adcPcmPeakAbs: 0,
+      pcm1808ClockConfigOk: 0,
+      pcm1808ClkSysHz: 0,
+      pcm1808ClkUsbHz: 0,
+      pcm1808MclkNominalHz: 0,
+      pcm1808StartupWaitCount: 0,
+      pcm1808DmaBlocks: 0,
+      pcm1808StereoFramesReceived: 0,
+      pcm1808MonoSamplesEmitted: 0,
+      pcm1808DmaBlockOverruns: 0,
+      pcm1808PioFifoStallOrOverflow: 0,
+      pcm1808SamplePeakAbs: 0,
+      pcm1808SaturatedCount: 0,
+      pcm1808RawLeftPeakAbs: 0,
+      pcm1808RawRightPeakAbs: 0,
+      pcm1808FrameRateMhz: 0,
+      pcm1808RateStatus: 0,
+      pcm1808MclkRatio: 0,
+      pcm1808Upsample: 0,
+      pcm1808BlocksLost: 0,
     };
   }
 

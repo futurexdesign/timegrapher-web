@@ -14,6 +14,18 @@ export declare const TIMEGRAPHER_HID_USAGE = 0x0001;
 export declare const TIMEGRAPHER_HID_REPORT_ID = 0x01;
 
 /**
+ * BLE control service and characteristics (BLE_CONTROL_PLANE.md §4.1). Lowercase,
+ * as Web Bluetooth requires. Frames are the HID frames (BLE_CONTROL_PLANE.md §4.3).
+ */
+export declare const TIMEGRAPHER_BLE_SERVICE_UUID = 'c137e7c0-92b4-4d9e-87e0-9ba757169016';
+/** Host → device (Write, WriteWithoutResponse): one frame per ATT write. */
+export declare const TIMEGRAPHER_BLE_RX_UUID = 'c137e7c1-92b4-4d9e-87e0-9ba757169016';
+/** Device → host (Notify): one frame per notification. */
+export declare const TIMEGRAPHER_BLE_TX_UUID = 'c137e7c2-92b4-4d9e-87e0-9ba757169016';
+/** Read: UTF-8 JSON of at most 64 bytes (`p`, `mtu`, `fmax`, `seg`). */
+export declare const TIMEGRAPHER_BLE_INFO_UUID = 'c137e7c3-92b4-4d9e-87e0-9ba757169016';
+
+/**
  * Max reassembled JSON payload (bytes). The device sends replies up to 2047
  * bytes but accepts requests of at most 2030 bytes (35 fragments of 58);
  * longer requests are dropped silently, without a reply.
@@ -24,6 +36,8 @@ export declare const TIMEGRAPHER_HID_MAX_JSON_BYTES = 2048;
  * Error codes returned in HidErrorResponse. `notFound` and `internal` are
  * reserved: the current firmware never sends them. `tooLarge` is sent only
  * for a reply that exceeds 2047 bytes (never for an oversized request).
+ * `linkBusy`: another link holds control (HID_CONTROL_PLANE.md §4.6); the
+ * request was not dispatched.
  */
 export type HidErrorCode =
   | 'unknownOp'
@@ -33,6 +47,7 @@ export type HidErrorCode =
   | 'tooLarge'
   | 'busy'
   | 'flashError'
+  | 'linkBusy'
   | 'internal';
 
 /** CamelCase block keys in getState / patchState. */
@@ -892,6 +907,36 @@ export interface HidHelloCaps {
   timebaseLogMax?: number;
   /** DSP data-flow graph. Absent on older firmware. */
   pipeline?: PipelineNode[];
+  /** Built with BLE (`TG_BLE=1`, Pico 2 W). Absent = false. See BLE_CONTROL_PLANE.md. */
+  ble?: boolean;
+  /** Serial CLI built (`TG_SERIAL_CLI=1`). Absent = false. */
+  cli?: boolean;
+}
+
+/** Control link a request arrived on (`hello.link`, `claim`, `controlReleased`). */
+export type HidLinkKind = 'usbHid' | 'ble';
+
+/** The link a `hello` arrived on (`hello.link`). */
+export interface HidHelloLink {
+  kind: HidLinkKind;
+  /** Negotiated ATT MTU. Present only for `ble`. */
+  mtu?: number;
+}
+
+/**
+ * Who holds the control plane (`hello.control`, `getLink.control`). Only one
+ * link owns control at a time (HID_CONTROL_PLANE.md §4.6).
+ */
+export interface HidHelloControl {
+  /** Owning link, or null when no link owns control. */
+  owner: HidLinkKind | null;
+  /** True when the owner is the link this request arrived on. */
+  self: boolean;
+  /**
+   * Lease length in ms: an owner that sends no request for this long can be
+   * taken over. 10000 in current firmware.
+   */
+  leaseMs: number;
 }
 
 export interface HidHelloResult {
@@ -902,6 +947,10 @@ export interface HidHelloResult {
   vid: number;
   pid: number;
   caps: HidHelloCaps;
+  /** The link this request arrived on. Absent on older firmware. */
+  link?: HidHelloLink;
+  /** Current owner of the control plane. Absent on older firmware. */
+  control?: HidHelloControl;
 }
 
 export interface HidSubscription {
@@ -955,7 +1004,10 @@ export type HidOp =
   | 'getBeats'
   | 'getGps'
   | 'getTimebaseLog'
-  | 'clearTimebaseLog';
+  | 'clearTimebaseLog'
+  | 'claim'
+  | 'getLink'
+  | 'getDiag';
 
 interface HidEnvelopeBase {
   v: HidProtocolVersion;
@@ -1153,6 +1205,204 @@ export interface HidGetMatchedRequest extends HidRequestBase {
   op: 'getMatched';
 }
 
+/**
+ * Asks to own the control plane (HID_CONTROL_PLANE.md §4.6). Without
+ * `takeover` it fails with `linkBusy` while another link holds a live lease.
+ * With `takeover: true` it takes control at once; the previous owner gets a
+ * `controlReleased` notify. Result: {@link HidClaimResult}.
+ */
+export interface HidClaimRequest extends HidRequestBase {
+  op: 'claim';
+  /** Default false. */
+  takeover?: boolean;
+}
+
+/** Result of `claim`. */
+export interface HidClaimResult {
+  /** The link that owns control after the request (the requesting link). */
+  owner: HidLinkKind;
+  /** The owner before the request, or null when none. */
+  previous: HidLinkKind | null;
+}
+
+/**
+ * BLE link status (`getLink.ble`). Present only on builds with `TG_BLE=1`.
+ * Counters are since boot unless the firmware resets them.
+ */
+export interface HidBleLinkStatus {
+  /** BLE is turned on (`ble off` turns it off). */
+  enabled: boolean;
+  /** Advertised local name, `TG-XXXX`. */
+  name: string;
+  /** Bluetooth device address of the stand, as text. */
+  address: string;
+  /** Advertising is running (the stand is connectable and no central is connected). */
+  advertising: boolean;
+  /** A central is connected with notifications on. */
+  connected: boolean;
+  /** Negotiated ATT MTU (23 until the exchange completes). */
+  mtu: number;
+  /** Current connection interval (µs). */
+  connIntervalUs: number;
+  /** Frames received on RX. */
+  rxFrames: number;
+  /** Frames sent on TX. */
+  txFrames: number;
+  /** Frames dropped because the RX ring was full. */
+  rxDropped: number;
+  /** RX writes rejected as invalid (longer than 63 bytes, bad length). */
+  rxInvalid: number;
+  /** TX sends deferred by the stack (backpressure). */
+  txRetries: number;
+  /** Connections lost since boot. */
+  disconnects: number;
+  /** HCI disconnect reason of the last loss; 0 = none since boot. */
+  lastDisconnectReason: number;
+  /** Core running the radio: 0 (`TG_BLE_CORE=0`) or 1 (`TG_BLE_CORE=1`). */
+  core: 0 | 1;
+  /** Free bytes of core 1's stack (high-water mark). Present only when `core` is 1. */
+  core1StackFree?: number;
+}
+
+/** Result of `getLink`: every link and who owns control. */
+export interface HidLinkStatus {
+  /** The USB HID link. */
+  usbHid: {
+    /** The USB device is enumerated and the HID interface is mounted. */
+    mounted: boolean;
+  };
+  /** The BLE link. Absent without `TG_BLE`. */
+  ble?: HidBleLinkStatus;
+  /** Same shape as `hello.control`. */
+  control: HidHelloControl;
+}
+
+/**
+ * Asks for the link status. Result: {@link HidLinkStatus}. An owner-only op
+ * (HID_CONTROL_PLANE.md §4.6): a non-owner gets `linkBusy` while another link
+ * holds a live lease. Otherwise the request auto-claims control for the
+ * requesting link, like any other op. To read ownership without claiming,
+ * use `hello.control`.
+ */
+export interface HidGetLinkRequest extends HidRequestBase {
+  op: 'getLink';
+}
+
+/**
+ * Asks for the diagnostic counters. Result: {@link HidDiag}. Same ownership
+ * rule as `getLink` (HID_CONTROL_PLANE.md §4.6): `linkBusy` for a non-owner
+ * while another link holds a live lease, otherwise auto-claim. Read
+ * `hello.control` to see the owner without claiming.
+ */
+export interface HidGetDiagRequest extends HidRequestBase {
+  op: 'getDiag';
+}
+
+/**
+ * Result of `getDiag`: the firmware diagnostic block (`diag_counters_t`,
+ * `include/diagnostics.h`) with camelCase names. Most fields are counters
+ * that only increase; the ADC, ring and PCM peak / min / max fields are
+ * extrema of the current diagnostic window.
+ */
+export interface HidDiag {
+  /** USB enumerations (bus resets seen by the device). */
+  usbEnumerationCount: number;
+  /** UAC2 audio streams opened by the host. */
+  usbAudioStreamOpenCount: number;
+  /** UAC2 audio streams closed. */
+  usbAudioStreamCloseCount: number;
+  /** USB suspend events. */
+  usbSuspendCount: number;
+  /** USB resume events. */
+  usbResumeCount: number;
+  /** Preamp boost rail switched on. */
+  boostOnCount: number;
+  /** Preamp boost rail switched off. */
+  boostOffCount: number;
+  /** Preamp settle waits started. */
+  preampSettleStartCount: number;
+  /** Preamp settle waits completed. */
+  preampSettleDoneCount: number;
+  /** Preamp starts aborted before settling. */
+  preampStartAbortedCount: number;
+  /** Total time spent suspended (ms). */
+  usbSuspendDurationMs: number;
+  /** Samples taken by the ADC or PCM1808 capture path. */
+  adcTotalSampleCount: number;
+  /** ADC conversion errors. */
+  adcConversionErrorCount: number;
+  /** Capture DMA buffers completed. */
+  dmaCompleteCount: number;
+  /** Capture DMA buffers overwritten before they were processed. */
+  dmaOverrunCount: number;
+  /** PCM ring reads that found it empty (USB audio starved). */
+  pcmRingUnderrunCount: number;
+  /** PCM ring writes that found it full (samples dropped). */
+  pcmRingOverrunCount: number;
+  /** USB IN audio packets sent. */
+  usbInPacketCount: number;
+  /** Audio samples sent in USB IN packets. */
+  usbInSampleCount: number;
+  /** USB IN writes that could not send a full packet. */
+  usbShortWriteCount: number;
+  /** Lowest PCM ring fill in the current diagnostic window (samples). */
+  ringMinOccupancy: number;
+  /** Highest PCM ring fill in the current diagnostic window (samples). */
+  ringMaxOccupancy: number;
+  /** Lowest ADC code in the current window. */
+  adcMinCode: number;
+  /** Highest ADC code in the current window. */
+  adcMaxCode: number;
+  /** Sum of ADC codes in the current window (for the mean). */
+  adcMeanCodeAccum: number;
+  /** Number of ADC codes summed in the current window. */
+  adcMeanCodeCount: number;
+  /** Learned or forced midrail (ADC counts) used for DC removal. */
+  adcDcCounts: number;
+  /** Max |code - dc| in the current window (ADC counts, pre-scale). */
+  adcAcPeakCounts: number;
+  /** Max |PCM24| after scale, before the optional LPF, in the window. */
+  adcPcmPeakAbs: number;
+  /** 1 when the PCM1808 clock configuration was accepted, else 0. */
+  pcm1808ClockConfigOk: number;
+  /** System clock frequency used for the PCM1808 clocks (Hz). */
+  pcm1808ClkSysHz: number;
+  /** USB clock frequency used for the PCM1808 clocks (Hz). */
+  pcm1808ClkUsbHz: number;
+  /** Nominal PCM1808 master clock (Hz). */
+  pcm1808MclkNominalHz: number;
+  /** Waits for the PCM1808 to start or settle before capture. */
+  pcm1808StartupWaitCount: number;
+  /** PCM1808 DMA blocks completed. */
+  pcm1808DmaBlocks: number;
+  /** Stereo frames received from the PCM1808 PIO. */
+  pcm1808StereoFramesReceived: number;
+  /** Mono samples emitted into the analysis path. */
+  pcm1808MonoSamplesEmitted: number;
+  /** PCM1808 DMA blocks overwritten before they were processed. */
+  pcm1808DmaBlockOverruns: number;
+  /** PIO FIFO stall or overflow events on the PCM1808 input. */
+  pcm1808PioFifoStallOrOverflow: number;
+  /** Max |sample| after scale in the window. */
+  pcm1808SamplePeakAbs: number;
+  /** Left-channel frames at the 24-bit full-scale or minimum code. */
+  pcm1808SaturatedCount: number;
+  /** Max |left24| of the raw I2S frames in the window (pre-DSP). */
+  pcm1808RawLeftPeakAbs: number;
+  /** Max |right24| of the raw I2S frames in the window (pre-DSP). */
+  pcm1808RawRightPeakAbs: number;
+  /** Last measured codec frame rate (milli-hertz; 0 = not measured yet). */
+  pcm1808FrameRateMhz: number;
+  /** Rate check state: 0 pending, 1 ok, 2 unsupported, 3 unknown. */
+  pcm1808RateStatus: number;
+  /** Accepted MCLK / fs ratio (256, 384, 512), or 0. */
+  pcm1808MclkRatio: number;
+  /** Sample repeat currently applied into the 48 kHz ring. */
+  pcm1808Upsample: number;
+  /** Captured blocks never processed; the source index skips them. */
+  pcm1808BlocksLost: number;
+}
+
 export type HidRequest =
   | HidHelloRequest
   | HidPingRequest
@@ -1183,7 +1433,10 @@ export type HidRequest =
   | HidGetBeatsRequest
   | HidGetGpsRequest
   | HidGetTimebaseLogRequest
-  | HidClearTimebaseLogRequest;
+  | HidClearTimebaseLogRequest
+  | HidClaimRequest
+  | HidGetLinkRequest
+  | HidGetDiagRequest;
 
 export interface HidSuccessResponse<T = unknown> extends HidEnvelopeBase {
   id: number;
@@ -1256,6 +1509,17 @@ export interface HidBeatsNotify extends HidNotifyBase {
   data: BeatsNotifyData;
 }
 
+/**
+ * Sent to the previous owner when another link takes control (`claim` with
+ * `takeover`, or an auto-claim after the lease expired), if its link is still
+ * connected (HID_CONTROL_PLANE.md §4.6). The host should stop subscriptions
+ * and show that control moved; `to` is the new owner.
+ */
+export interface HidControlReleasedNotify extends HidNotifyBase {
+  op: 'controlReleased';
+  data: { to: HidLinkKind };
+}
+
 export type HidNotify =
   | HidMetricsNotify
   | HidTimingNotify
@@ -1264,7 +1528,8 @@ export type HidNotify =
   | HidErrorNotify
   | HidQuartzNotify
   | HidQuartzPulseNotify
-  | HidBeatsNotify;
+  | HidBeatsNotify
+  | HidControlReleasedNotify;
 
 /** Any device → host JSON message. */
 export type HidInboundMessage = HidResponse | HidNotify;
@@ -1323,6 +1588,9 @@ export interface HidResultMap {
   getGps: GpsInfo;
   getTimebaseLog: TimebaseLog;
   clearTimebaseLog: TimebaseLog;
+  claim: HidClaimResult;
+  getLink: HidLinkStatus;
+  getDiag: HidDiag;
 }
 
 /** Notify `op` to `data` map. */
@@ -1335,4 +1603,5 @@ export interface HidNotifyDataMap {
   quartz: DspQuartz;
   quartzPulse: DspQuartzPulse;
   beats: BeatsNotifyData;
+  controlReleased: { to: HidLinkKind };
 }

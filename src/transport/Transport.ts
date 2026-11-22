@@ -1,14 +1,15 @@
 /**
  * Transport abstraction between the app and a timegrapher device.
  *
- * Two implementations exist: `WebHidTransport` (real hardware over WebHID) and
+ * Three implementations exist: `WebHidTransport` and `WebBleTransport` (real
+ * hardware over WebHID or Web Bluetooth) and
  * a virtual device built by `src/sim`. Everything above this layer (stores,
  * views) talks only to {@link Transport}, so it never knows which is in use.
  */
 import type { HidErrorCode, HidNotify, OpName, RequestOf, ResultOf } from '@/protocol/types';
 
 /** Which implementation backs a {@link Transport}. */
-export type TransportKind = 'webhid' | 'virtual';
+export type TransportKind = 'webhid' | 'webble' | 'virtual';
 
 /**
  * Client-side failure codes, in addition to the device's {@link HidErrorCode}s.
@@ -16,8 +17,10 @@ export type TransportKind = 'webhid' | 'virtual';
  * - `disconnected`: the device went away (or was closed) with the request outstanding.
  * - `notOpen`: request issued while the transport is not open.
  * - `protocol`: the request could not be encoded (e.g. over 2048 bytes).
+ * - `linkUnsupported`: the link cannot carry the control plane (BLE MTU below 66, §6.2).
  */
-export type ClientErrorCode = 'timeout' | 'disconnected' | 'notOpen' | 'protocol';
+export type ClientErrorCode =
+  'timeout' | 'disconnected' | 'notOpen' | 'protocol' | 'linkUnsupported';
 
 /** Any code a {@link DeviceError} can carry. */
 export type DeviceErrorCode = HidErrorCode | ClientErrorCode;

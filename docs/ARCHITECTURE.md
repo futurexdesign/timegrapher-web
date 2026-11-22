@@ -5,36 +5,46 @@ Module map and data flow of the web app. See `README.md` for usage.
 ## Layers
 
 ```
-views / components  ->  stores (Pinia)  ->  Transport  ->  WebHidTransport  -> device
-                                                      \->  VirtualTransport -> VirtualDevice (src/sim)
+views / components -> stores (Pinia) -> Transport (interface)
+                                          ├─ FramedTransport (base class: queue, ids, timeouts, notify, keepalive, takeover)
+                                          │    ├─ WebHidTransport -> HIDDevice (USB HID)
+                                          │    └─ WebBleTransport -> GATT service (BLE)
+                                          └─ VirtualTransport    -> VirtualDevice (src/sim)
 ```
 
 Upper layers only know the `Transport` interface (`src/transport/Transport.ts`):
 `open`, `close`, typed `request(op, body, timeoutMs)`, `onNotify`, `onDisconnect`.
-They never see which implementation is behind it.
+They never see which implementation is behind it. `VirtualTransport` implements
+`Transport` directly: it has no link and no framing, so it does not extend
+`FramedTransport`.
 
 ## Module map
 
-| Path                          | Role                                                                                                                                                                                                                               |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/protocol/`               | `timegrapher_hid.d.ts` (synced from the firmware repo, never edited), `types.ts` (re-export), `constants.ts` (runtime values), `framer.ts` (encoder / reassembler), `messages.ts` (response / notify guards, error normalisation). |
-| `src/transport/`              | `Transport` interface, `DeviceError` (device error codes plus client codes `timeout`, `disconnected`, `notOpen`, `protocol`), `WebHidTransport`.                                                                                   |
-| `src/sim/`                    | Virtual device (below).                                                                                                                                                                                                            |
-| `src/stores/`                 | Pinia stores. `connection` owns the transport; `subscriptions` owns the push subscription and notify bus; the rest are feature stores.                                                                                             |
-| `src/composables/`            | `usePcCalibration`: PC-assisted timebase calibration (injectable state machine, wake lock, visibility).                                                                                                                            |
-| `src/views/`                  | One routed page each; they claim polling / subscriptions while mounted.                                                                                                                                                            |
-| `src/components/`             | `timegrapher/`, `audio/`, `timebase/`, `settings/` plus shared `ConnectPrompt`, `AppBarConnection`.                                                                                                                                |
-| `src/utils/`                  | Pure, unit-tested helpers (no Vue state): `tickTock`, `balance`, `sky`, `calibration`, `quartzPulses`, `dspMeta` (block metadata), `pipelineLayout`, `format`, `budget`, `capsChips`, `rawConsole`.                                |
-| `src/router/`, `src/layouts/` | Hash-history routes (lazy views; `meta.nav` feeds the drawer) and the shell.                                                                                                                                                       |
-| `src/plugins/`                | Vuetify and tree-shaken ECharts registration.                                                                                                                                                                                      |
-| `tests/contract/`             | Transport contract suite plus the simulator harness.                                                                                                                                                                               |
+| Path                          | Role                                                                                                                                                                                                                                                                               |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/protocol/`               | `timegrapher_hid.d.ts` (synced from the firmware repo, never edited), `types.ts` (re-export), `constants.ts` (runtime values, including the BLE UUIDs and `BLE_MIN_MTU`), `framer.ts` (encoder / reassembler), `messages.ts` (response / notify guards, error normalisation).      |
+| `src/transport/`              | `Transport` interface, `DeviceError` (device error codes plus client codes `timeout`, `disconnected`, `notOpen`, `protocol`, `linkUnsupported`), `FramedTransport` (base class), `WebHidTransport`, `WebBleTransport`, `fakeBluetooth.ts` (test double for the Web Bluetooth API). |
+| `src/sim/`                    | Virtual device (below).                                                                                                                                                                                                                                                            |
+| `src/stores/`                 | Pinia stores. `connection` owns the transport; `subscriptions` owns the push subscription and notify bus; the rest are feature stores.                                                                                                                                             |
+| `src/composables/`            | `usePcCalibration`: PC-assisted timebase calibration (injectable state machine, wake lock, visibility).                                                                                                                                                                            |
+| `src/views/`                  | One routed page each; they claim polling / subscriptions while mounted.                                                                                                                                                                                                            |
+| `src/components/`             | `timegrapher/`, `audio/`, `timebase/`, `settings/` plus shared `ConnectPrompt`, `AppBarConnection`.                                                                                                                                                                                |
+| `src/utils/`                  | Pure, unit-tested helpers (no Vue state): `tickTock`, `balance`, `sky`, `calibration`, `quartzPulses`, `dspMeta` (block metadata), `pipelineLayout`, `format`, `budget`, `capsChips`, `rawConsole`.                                                                                |
+| `src/router/`, `src/layouts/` | Hash-history routes (lazy views; `meta.nav` feeds the drawer) and the shell.                                                                                                                                                                                                       |
+| `src/plugins/`                | Vuetify and tree-shaken ECharts registration.                                                                                                                                                                                                                                      |
+| `tests/contract/`             | Transport contract suite plus the simulator harness.                                                                                                                                                                                                                               |
 
 ## Transport
 
-`WebHidTransport` sends one request at a time (a second request while one is
-pending is dropped silently by the device; `busy` only means a flash write was
-refused): a queue with a single in-flight slot, matching replies by `id`,
-per-request timeout (default 4 s), late replies ignored. Requests are framed
+`FramedTransport` holds everything that does not depend on the link: the queue
+with a single in-flight request, matching replies by `id`, the per-request
+timeout (default 4 s), late replies ignored, notify dispatch, the idle keepalive
+and the `controlReleased` takeover. A subclass supplies `openLink`, `closeLink`
+and `sendFrame`, and calls `onFrame` / `onLinkLost` for inbound data. The device
+handles one request at a time and silently drops a second one sent while a
+request is pending (`busy` only means a flash write was refused), so the queue
+sends the next request only after the previous one settles. `WebHidTransport`
+is the USB subclass; the rest of this section describes its framing. Requests are framed
 into 63-byte reports with a 5-byte header (`flags, msgSeq, fragIndex,
 fragCount, payloadLen`) carrying at most 58 UTF-8 bytes each, up to 2030 bytes
 of JSON for requests (`HID_MAX_REQUEST_BYTES`; longer ones are dropped silently by
@@ -43,14 +53,61 @@ bytes for replies. Messages without an `id` are notifies and go to the `onNotify
 listeners; a HID `disconnect` event fails every outstanding request and fires
 `onDisconnect`.
 
+## Transport: BLE
+
+`WebBleTransport` is the Web Bluetooth subclass of `FramedTransport`. It supplies
+only the GATT link. The firmware side (GATT layout, frame rules, ownership
+rules) is specified in `docs/BLE_CONTROL_PLANE.md` in the `timegrapher-stand`
+repository, §4. This section describes what the web code does.
+
+- **GATT layout** (`src/protocol/constants.ts`): service `BLE_SERVICE_UUID`
+  with RX (`BLE_RX_UUID`, write), TX (`BLE_TX_UUID`, notify) and INFO
+  (`BLE_INFO_UUID`, read: `{"p","mtu","fmax","seg"}` JSON). UUIDs are lowercase,
+  as Web Bluetooth requires. The chooser filters on the service and on the
+  `TG-` name prefix (`BLE_NAME_PREFIX`); if the browser rejects the name filter,
+  one retry uses the service filter alone.
+- **Open**: connect, get the three characteristics, read INFO. An MTU below 66
+  (`BLE_MIN_MTU`) is re-read up to 3 times, 300 ms apart; if it stays below 66
+  and the device is not in segmented mode (`seg: 1`), `open` fails with
+  `DeviceError('linkUnsupported')`. TX notifications start before the first RX
+  write.
+- **Frames**: the shared encoder pads to 63 bytes for WebHID. `sendFrame` cuts
+  the padding, so each ATT write is exactly `5 + payloadLen` bytes (5 to 63).
+  One frame goes in one value in each direction. A received value longer than
+  63 bytes is dropped. Segmented mode (`seg: 1`, a fallback for a 23-byte MTU)
+  splits frames into `START`-flagged segments with a 1-byte header.
+- **One GATT operation in flight**: `FramedTransport` awaits each `sendFrame`
+  before it sends the next frame or request, so the browser never sees two
+  overlapping GATT operations. Writes use `writeValueWithResponse` by default
+  (`writeMode` option). The keepalive goes through the same queue.
+- **Keepalive**: after 3000 ms without a request (`DEFAULT_KEEPALIVE_MS`), the
+  base class sends `ping` with a 2000 ms timeout (`KEEPALIVE_TIMEOUT_MS`). A
+  failed ping is logged and ignored. The device's ownership lease is 10 s, so an
+  idle but open page keeps control. The timer is re-armed by every request.
+- **Ownership and takeover**: `hello.control` reports the owner. A `linkBusy`
+  reply, or a `controlReleased` notify (`HidControlReleasedNotify`, typed from
+  `timegrapher_hid.d.ts`), goes to the connection store. A `controlReleased`
+  notify makes the base class tear the link down with the reason
+  `Control taken over by <kind>`. Disconnect listeners fire once, as for an
+  unplug. `close()` does not fire them. A GATT disconnect reports
+  `Device disconnected`.
+- **Link rate caps**: `LINK_RATE_CAPS` (`src/stores/subscriptions.ts`) gives the
+  highest push rates per `TransportKind`. `webhid` allows `metricsHz` 20 and
+  `beatHz` / `timingHz` / `quartzHz` 5. `webble` is provisional at 10 / 2 / 2 / 2
+  until HW-07 measurements. `clampToLink` applies the caps before `subscribe`.
+  The simulator has no row, so it is not clamped.
+
 ## Connection
 
 After `hello`, a `protocolVersion` other than 1 shows a warning snackbar but
 the connection stays up.
 
 `useConnectionStore().connect(kind)` builds the transport with a factory
-(`defaultTransportFactory`: `'webhid'` gives `WebHidTransport`, `'virtual'`
-gives `createVirtualTransport()` from `src/sim`), opens it and sends `hello`.
+(`defaultTransportFactory`: `'webhid'` gives `WebHidTransport`, `'webble'`
+gives `WebBleTransport`, `'virtual'` gives `createVirtualTransport()` from
+`src/sim`), opens it and sends `hello`. If `hello.control` names another owner,
+the store enters `needsTakeover` and opens the takeover dialog before any other
+request is sent.
 The store exposes `status`, `hello`, `caps` and `features` (booleans derived
 from caps: `quartz`, `beats`, `deviceMode`, `gps`, `pps`, `timebaseLog`,
 `timing`, `pipeline`). Every feature-dependent UI part is gated on

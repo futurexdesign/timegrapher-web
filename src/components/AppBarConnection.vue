@@ -1,10 +1,12 @@
 <script setup lang="ts">
 /**
  * App-bar controls: connection status chip (with device board / firmware),
- * connect menu (real WebHID device or virtual device), disconnect button and
- * the light / dark / system theme toggle.
+ * connect menu (WebHID, Web Bluetooth or virtual device), disconnect button,
+ * the light / dark / system theme toggle and the takeover dialog (mounted here
+ * because this component lives for the whole session).
  */
 import { computed } from 'vue';
+import TakeoverDialog from '@/components/TakeoverDialog.vue';
 import { useConnectionStore } from '@/stores/connection';
 import { useThemeStore, type ThemePreference } from '@/stores/theme';
 
@@ -16,10 +18,11 @@ const chip = computed(() => {
     case 'connected':
       return {
         color: 'success',
-        icon: 'mdi-usb',
+        icon: connection.kind === 'webble' ? 'mdi-bluetooth' : 'mdi-usb',
         text: `${connection.kind === 'virtual' ? 'Virtual' : 'Connected'} · ${connection.deviceLabel}`,
       };
     case 'connecting':
+    case 'needsTakeover':
       return { color: 'warning', icon: 'mdi-progress-clock', text: 'Connecting…' };
     default:
       return { color: undefined, icon: 'mdi-usb-port', text: 'Disconnected' };
@@ -50,7 +53,7 @@ function cycleTheme(): void {
       <v-btn
         v-bind="menu"
         prepend-icon="mdi-connection"
-        :disabled="connection.status === 'connecting'"
+        :disabled="connection.status !== 'disconnected'"
         variant="tonal"
       >
         Connect
@@ -73,6 +76,22 @@ function cycleTheme(): void {
           </div>
         </template>
       </v-tooltip>
+      <v-tooltip
+        :disabled="connection.webBleAvailable"
+        text="Web Bluetooth is unavailable: use Chrome or Edge (or Bluefy on iPhone and iPad) with Bluetooth on"
+        location="left"
+      >
+        <template #activator="{ props: tip }">
+          <div v-bind="tip">
+            <v-list-item
+              prepend-icon="mdi-bluetooth"
+              title="Real device (Bluetooth)"
+              :disabled="!connection.webBleAvailable"
+              @click="connection.connect('webble')"
+            />
+          </div>
+        </template>
+      </v-tooltip>
       <v-list-item
         prepend-icon="mdi-test-tube"
         title="Virtual device"
@@ -83,6 +102,8 @@ function cycleTheme(): void {
   <v-btn v-else prepend-icon="mdi-power-plug-off" @click="connection.disconnect()">
     Disconnect
   </v-btn>
+
+  <TakeoverDialog />
 
   <v-btn
     :icon="themeIcons[themeStore.preference]"
