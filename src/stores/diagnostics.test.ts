@@ -131,11 +131,8 @@ describe('diagnostics store', () => {
   it('reports a getLink failure once while polling', async () => {
     const f = fake();
     await setup(f);
-    f.request.mockImplementation((op: string): Promise<unknown> =>
-      op === 'getLink'
-        ? Promise.reject(new DeviceError('linkBusy', 'control held by ble'))
-        : Promise.resolve({}),
-    );
+    /* Only getLink is called from here on. */
+    f.request.mockRejectedValue(new DeviceError('linkBusy', 'control held by ble'));
     const d = useDiagnosticsStore();
     const snack = vi.spyOn(useSnackbarStore(), 'error');
     expect(await d.refreshLink(true)).toBe(false);
