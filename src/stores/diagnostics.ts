@@ -1,6 +1,6 @@
 /**
  * Diagnostics store: DSP timing (`getTiming`, polled at 1 Hz while a consumer
- * is visible), the fault log (`getErrors` + live `error` notifies) and the
+ * is visible), link status (`getLink`, likewise polled), the fault log (`getErrors` + live `error` notifies) and the
  * recent event table (`getEvents`, optional live `event` notifies).
  *
  * Consumers call `startPolling()` / `stopPolling()` (reference counted) and
@@ -10,7 +10,7 @@
  */
 import { ref, shallowRef, watch } from 'vue';
 import { defineStore } from 'pinia';
-import type { DspError, DspEvent, DspTiming } from '@/protocol/types';
+import type { DspError, DspEvent, DspTiming, HidLinkStatus } from '@/protocol/types';
 import { useConnectionStore } from './connection';
 import { useSnackbarStore } from './snackbar';
 import { useSubscriptionsStore } from './subscriptions';
@@ -35,6 +35,8 @@ export const useDiagnosticsStore = defineStore('diagnostics', () => {
 
   /** Latest getTiming result. */
   const timing = ref<DspTiming | null>(null);
+  /** Latest getLink result: both links, BLE counters and control ownership. */
+  const link = ref<HidLinkStatus | null>(null);
   /** Fault log, oldest first as returned by the device. */
   const errors = shallowRef<DspError[]>([]);
   /** Most recent detected events. */
@@ -42,6 +44,7 @@ export const useDiagnosticsStore = defineStore('diagnostics', () => {
   /** Live `{events: true}` push is requested. */
   const liveEvents = ref(false);
   let timingErrorShown = false;
+  let linkErrorShown = false;
   let offError: (() => void) | null = null;
   let offEvent: (() => void) | null = null;
   let attached = 0;
@@ -71,6 +74,37 @@ export const useDiagnosticsStore = defineStore('diagnostics', () => {
   /** Stops one polling user. */
   function stopPolling(): void {
     poller.stop();
+  }
+
+  /**
+   * Reads getLink once. Every firmware with the control plane answers it; a
+   * `linkBusy` reply (another app holds control) is reported once per streak.
+   * @param quiet Suppress repeated error snackbars (polling).
+   */
+  async function refreshLink(quiet = false): Promise<boolean> {
+    if (!connection.isConnected) return false;
+    try {
+      link.value = await connection.requireTransport().request('getLink');
+      linkErrorShown = false;
+      return true;
+    } catch (e) {
+      if (!quiet || !linkErrorShown) snackbar.error(e, 'getLink failed');
+      linkErrorShown = true;
+      return false;
+    }
+  }
+
+  const linkPoller = createPoller(async () => {
+    await refreshLink(true);
+  });
+
+  /** Starts (reference counted) 1 Hz polling of getLink. */
+  function startLinkPolling(): void {
+    linkPoller.start();
+  }
+  /** Stops one getLink polling user. */
+  function stopLinkPolling(): void {
+    linkPoller.stop();
   }
 
   /** Clears the device timing statistics (`resetTiming`) and re-reads them. */
@@ -171,9 +205,11 @@ export const useDiagnosticsStore = defineStore('diagnostics', () => {
   /** Drops all device-specific data (on disconnect / connect). */
   function reset(): void {
     timing.value = null;
+    link.value = null;
     errors.value = [];
     events.value = [];
     timingErrorShown = false;
+    linkErrorShown = false;
   }
 
   watch(
@@ -185,6 +221,7 @@ export const useDiagnosticsStore = defineStore('diagnostics', () => {
 
   return {
     timing,
+    link,
     errors,
     events,
     liveEvents,
@@ -192,6 +229,9 @@ export const useDiagnosticsStore = defineStore('diagnostics', () => {
     refreshTiming,
     startPolling,
     stopPolling,
+    refreshLink,
+    startLinkPolling,
+    stopLinkPolling,
     resetTiming,
     refreshErrors,
     clearErrors,

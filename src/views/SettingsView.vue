@@ -14,6 +14,7 @@ import AppearanceSection from '@/components/settings/AppearanceSection.vue';
 import DeviceInfoSection from '@/components/settings/DeviceInfoSection.vue';
 import DeviceModeSection from '@/components/settings/DeviceModeSection.vue';
 import FaultsEventsSection from '@/components/settings/FaultsEventsSection.vue';
+import LinkSection from '@/components/settings/LinkSection.vue';
 import PerformanceSection from '@/components/settings/PerformanceSection.vue';
 import SimulatorPanel from '@/components/settings/SimulatorPanel.vue';
 import { useConnectionStore } from '@/stores/connection';
@@ -57,6 +58,9 @@ const open = ref<string[]>(['mode', 'info']);
         </v-expansion-panel>
         <v-expansion-panel value="performance" title="Performance">
           <v-expansion-panel-text><PerformanceSection /></v-expansion-panel-text>
+        </v-expansion-panel>
+        <v-expansion-panel value="link" title="Link">
+          <v-expansion-panel-text><LinkSection /></v-expansion-panel-text>
         </v-expansion-panel>
         <v-expansion-panel value="faults" title="Faults &amp; events">
           <v-expansion-panel-text><FaultsEventsSection /></v-expansion-panel-text>

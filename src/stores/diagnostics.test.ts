@@ -1,7 +1,14 @@
 /** Diagnostics store tests against a fake transport. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import type { DspError, DspEvent, DspTiming, HidHelloResult, HidNotify } from '@/protocol/types';
+import type {
+  DspError,
+  DspEvent,
+  DspTiming,
+  HidHelloResult,
+  HidLinkStatus,
+  HidNotify,
+} from '@/protocol/types';
 import { DeviceError, type Transport } from '@/transport/Transport';
 import { useConnectionStore } from './connection';
 import { EVENT_LIMIT, useDiagnosticsStore } from './diagnostics';
@@ -31,6 +38,10 @@ const hello: HidHelloResult = {
 const timing = { dspBlockUsLast: 10, dspBlockBudgetUs: 1000, loopBusyPct: 3 } as DspTiming;
 const err: DspError = { block: 'gain', reason: 'underrun', uptimeMs: 5, sampleIndex: '1' };
 const ev = { startSample: '1', snrDb: 12 } as DspEvent;
+const linkStatus: HidLinkStatus = {
+  usbHid: { mounted: true },
+  control: { owner: 'usbHid', self: true, leaseMs: 10000 },
+};
 
 interface Fake {
   t: Transport;
@@ -50,6 +61,8 @@ function fake(): Fake {
         return Promise.resolve({ errors: [err] });
       case 'getEvents':
         return Promise.resolve({ events: [ev] });
+      case 'getLink':
+        return Promise.resolve(linkStatus);
       case 'subscribe':
         return Promise.resolve({
           metricsHz: 0,
@@ -103,6 +116,31 @@ describe('diagnostics store', () => {
     await d.refreshEvents();
     expect(f.request).toHaveBeenCalledWith('getEvents', { limit: EVENT_LIMIT });
     expect(d.events).toEqual([ev]);
+  });
+
+  it('reads the link status and clears it on disconnect', async () => {
+    const f = fake();
+    await setup(f);
+    const d = useDiagnosticsStore();
+    expect(await d.refreshLink()).toBe(true);
+    expect(d.link).toEqual(linkStatus);
+    d.reset();
+    expect(d.link).toBeNull();
+  });
+
+  it('reports a getLink failure once while polling', async () => {
+    const f = fake();
+    await setup(f);
+    f.request.mockImplementation((op: string): Promise<unknown> =>
+      op === 'getLink'
+        ? Promise.reject(new DeviceError('linkBusy', 'control held by ble'))
+        : Promise.resolve({}),
+    );
+    const d = useDiagnosticsStore();
+    const snack = vi.spyOn(useSnackbarStore(), 'error');
+    expect(await d.refreshLink(true)).toBe(false);
+    expect(await d.refreshLink(true)).toBe(false);
+    expect(snack).toHaveBeenCalledTimes(1);
   });
 
   it('clears errors and resets timing', async () => {
