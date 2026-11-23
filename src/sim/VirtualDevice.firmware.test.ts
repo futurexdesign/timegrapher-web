@@ -166,3 +166,38 @@ describe('notify policy', () => {
     expect(d.pollNotify()).toBeNull();
   });
 });
+
+describe('BLE build option', () => {
+  it('a default device has no caps.ble and no getLink.ble', () => {
+    const d = dev();
+    expect('ble' in d.handle('hello', {}).caps).toBe(false);
+    expect(d.handle('getLink', {}).ble).toBeUndefined();
+  });
+
+  it('a device reached over BLE has caps.ble and a connected getLink.ble at linkMtu', () => {
+    const d = dev({ linkKind: 'ble', linkMtu: 247 });
+    expect(d.handle('hello', {}).caps.ble).toBe(true);
+    expect(d.handle('getLink', {}).ble).toMatchObject({
+      enabled: true,
+      connected: true,
+      mtu: 247,
+      connIntervalUs: 30000,
+      core: 0,
+    });
+  });
+
+  it('a BLE build reached over USB reports the radio as off', () => {
+    const d = dev({ ble: true });
+    expect(d.handle('getLink', {}).ble).toMatchObject({ enabled: false, connected: false });
+  });
+
+  it('the board option sets the hello board name', () => {
+    expect(dev({ board: 'Pico2W' }).handle('hello', {}).board).toBe('Pico2W (virtual)');
+    expect(dev().handle('hello', {}).board).toBe('Pico2 (virtual)');
+    expect(dev({ ble: true }).handle('hello', {}).board).toBe('Pico2W (virtual)');
+  });
+
+  it('a BLE link without a BLE build throws RangeError', () => {
+    expect(() => dev({ linkKind: 'ble', ble: false })).toThrow(RangeError);
+  });
+});

@@ -2,11 +2,13 @@
 /**
  * Empty state shown by views while no device is connected. Offers the same
  * connect options as the app-bar menu: WebHID (USB), Web Bluetooth and the
- * virtual device. The platform only adapts the guidance (BLE_TRANSPORT_PLAN.md
- * §6.4): Bluefy-like browsers (Web Bluetooth without WebHID) drop the WebHID
+ * virtual device (which opens a board picker). The platform only adapts the
+ * guidance (BLE_TRANSPORT_PLAN.md §6.4): Bluefy-like browsers (Web Bluetooth without WebHID) drop the WebHID
  * button, and iOS browsers with neither API get a hint to open the page in a
  * Web Bluetooth browser. No option is ever blocked because of the user agent.
  */
+import { ref } from 'vue';
+import VirtualDevicePicker from '@/components/VirtualDevicePicker.vue';
 import { useConnectionStore } from '@/stores/connection';
 import { useSnackbarStore } from '@/stores/snackbar';
 import { isIos, readPlatform } from '@/utils/platform';
@@ -18,6 +20,9 @@ defineProps<{
 
 const connection = useConnectionStore();
 const snackbar = useSnackbarStore();
+
+/** Visibility of the virtual-board picker. */
+const pickerOpen = ref(false);
 
 const platform = readPlatform();
 const hasHid = connection.webHidAvailable;
@@ -115,10 +120,12 @@ async function copyLink(): Promise<void> {
         prepend-icon="mdi-test-tube"
         variant="tonal"
         :disabled="connection.status !== 'disconnected'"
-        @click="connection.connect('virtual')"
+        data-testid="connect-virtual"
+        @click="pickerOpen = true"
       >
         Virtual device
       </v-btn>
     </template>
   </v-empty-state>
+  <VirtualDevicePicker v-model="pickerOpen" />
 </template>

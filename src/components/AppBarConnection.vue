@@ -1,17 +1,22 @@
 <script setup lang="ts">
 /**
  * App-bar controls: connection status chip (with device board / firmware),
- * connect menu (WebHID, Web Bluetooth or virtual device), disconnect button,
- * the light / dark / system theme toggle and the takeover dialog (mounted here
- * because this component lives for the whole session).
+ * connect menu (WebHID, Web Bluetooth or virtual device, which opens a board
+ * picker), disconnect button, the light / dark / system theme toggle and the
+ * takeover dialog (mounted here because this component lives for the whole
+ * session).
  */
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import TakeoverDialog from '@/components/TakeoverDialog.vue';
+import VirtualDevicePicker from '@/components/VirtualDevicePicker.vue';
 import { useConnectionStore } from '@/stores/connection';
 import { useThemeStore, type ThemePreference } from '@/stores/theme';
 
 const connection = useConnectionStore();
 const themeStore = useThemeStore();
+
+/** Visibility of the virtual-board picker. */
+const pickerOpen = ref(false);
 
 const chip = computed(() => {
   switch (connection.status) {
@@ -95,7 +100,8 @@ function cycleTheme(): void {
       <v-list-item
         prepend-icon="mdi-test-tube"
         title="Virtual device"
-        @click="connection.connect('virtual')"
+        data-testid="connect-virtual"
+        @click="pickerOpen = true"
       />
     </v-list>
   </v-menu>
@@ -103,6 +109,7 @@ function cycleTheme(): void {
     Disconnect
   </v-btn>
 
+  <VirtualDevicePicker v-model="pickerOpen" />
   <TakeoverDialog />
 
   <v-btn

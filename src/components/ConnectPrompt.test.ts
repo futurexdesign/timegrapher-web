@@ -8,6 +8,23 @@ import * as directives from 'vuetify/directives';
 import { useConnectionStore } from '@/stores/connection';
 import ConnectPrompt from './ConnectPrompt.vue';
 
+vi.stubGlobal(
+  'ResizeObserver',
+  class {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  },
+);
+
+vi.stubGlobal('visualViewport', {
+  width: 1024,
+  height: 768,
+  scale: 1,
+  addEventListener(): void {},
+  removeEventListener(): void {},
+});
+
 const IPAD_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15';
 
@@ -52,6 +69,12 @@ describe('ConnectPrompt', () => {
   afterEach(() => {
     wrapper?.unmount();
     wrapper = null;
+    document.body.innerHTML = '';
+    try {
+      localStorage.clear();
+    } catch {
+      // Storage unavailable: nothing to clear.
+    }
     for (const n of OVERRIDDEN) Reflect.deleteProperty(navigator, n);
   });
 
@@ -65,6 +88,23 @@ describe('ConnectPrompt', () => {
     expect(btn.text()).toContain('Real device (Bluetooth)');
     await btn.trigger('click');
     expect(connect).toHaveBeenCalledWith('webble');
+  });
+
+  it('clicking Virtual device opens the picker without connecting', async () => {
+    setNav('bluetooth', bluetooth);
+    setNav('hid', {});
+    wrapper = await mountPrompt();
+    const connect = vi.spyOn(useConnectionStore(), 'connect').mockResolvedValue();
+    await wrapper.find('[data-testid="connect-virtual"]').trigger('click');
+    await flushPromises();
+    expect(document.body.querySelector('[data-testid="virtual-picker"]')).not.toBeNull();
+    expect(connect).not.toHaveBeenCalled();
+    document.body
+      .querySelector<HTMLElement>('[data-testid="virtual-variant-pico2w-pcm1808"]')
+      ?.click();
+    await flushPromises();
+    document.body.querySelector<HTMLElement>('[data-testid="virtual-confirm"]')?.click();
+    expect(connect).toHaveBeenCalledWith('virtual', { virtualVariant: 'pico2w-pcm1808' });
   });
 
   it('UI-02 iOS without Web Bluetooth or WebHID explains Bluefy and copies the link', async () => {

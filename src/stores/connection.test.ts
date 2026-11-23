@@ -120,8 +120,26 @@ describe('connection store', () => {
     expect(store.status).toBe('connected');
     expect(store.kind).toBe('virtual');
     expect(store.features.deviceMode).toBe(true);
+    expect(store.hello?.board).toBe('Pico2 (virtual)');
+    expect(store.hello?.caps.ble).toBeUndefined();
     await store.disconnect();
     expect(store.status).toBe('disconnected');
+  });
+
+  it('connect passes the options to the factory', async () => {
+    const store = useConnectionStore();
+    const factory = vi.fn(() => fakeTransport());
+    store.setTransportFactory(factory);
+    await store.connect('virtual', { virtualVariant: 'pico2w-pcm1808' });
+    expect(factory).toHaveBeenCalledWith('virtual', { virtualVariant: 'pico2w-pcm1808' });
+  });
+
+  it('the Pico 2 W virtual variant reports BLE in hello', async () => {
+    const store = useConnectionStore();
+    await store.connect('virtual', { virtualVariant: 'pico2w-pcm1808' });
+    expect(store.hello?.board).toBe('Pico2W (virtual)');
+    expect(store.caps?.ble).toBe(true);
+    await store.disconnect();
   });
 });
 

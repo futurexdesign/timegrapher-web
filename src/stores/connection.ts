@@ -15,7 +15,7 @@ import type {
   RequestOf,
   ResultOf,
 } from '@/protocol/types';
-import { createVirtualTransport } from '@/sim'; // FACTORY HOOK: virtual device
+import { createVirtualTransport, type VirtualVariantId } from '@/sim'; // FACTORY HOOK: virtual device
 import { DeviceError, type Transport, type TransportKind } from '@/transport/Transport';
 import { WebBleTransport, isWebBleAvailable, isWebBleSupported } from '@/transport/WebBleTransport';
 import { WebHidTransport, isWebHidSupported } from '@/transport/WebHidTransport';
@@ -62,23 +62,30 @@ function ownerFromBusy(message: string): HidLinkKind | null {
   return m?.[1] === 'ble' ? 'ble' : m?.[1] === 'usbHid' ? 'usbHid' : null;
 }
 
+/** Per-connect choices that only some transport kinds use. */
+export interface ConnectOptions {
+  /** Board the `virtual` transport imitates (default: the Pico 2 without BLE). */
+  virtualVariant?: VirtualVariantId;
+}
+
 /** Builds a transport for a kind. Overridable for tests. */
-export type TransportFactory = (kind: TransportKind) => Transport;
+export type TransportFactory = (kind: TransportKind, opts?: ConnectOptions) => Transport;
 
 /**
  * Default factory.
  * FACTORY HOOK: add/replace transport kinds here. The 'virtual' branch calls
  * `createVirtualTransport` from `src/sim/index.ts`.
  * @param kind Transport kind to build.
+ * @param opts Per-connect choices; `virtualVariant` applies to `virtual` only.
  */
-export const defaultTransportFactory: TransportFactory = (kind) => {
+export const defaultTransportFactory: TransportFactory = (kind, opts) => {
   switch (kind) {
     case 'webhid':
       return new WebHidTransport();
     case 'webble':
       return new WebBleTransport();
     case 'virtual':
-      return createVirtualTransport();
+      return createVirtualTransport({ variant: opts?.virtualVariant });
   }
 };
 
@@ -257,15 +264,16 @@ export const useConnectionStore = defineStore('connection', () => {
    * Connects: builds the transport, opens it, then issues `hello`.
    * Failures are reported via the snackbar (user-cancelled choosers are quiet).
    * @param k Which kind of device to connect to.
+   * @param opts Per-connect choices, such as the virtual board variant.
    */
-  async function connect(k: TransportKind): Promise<void> {
+  async function connect(k: TransportKind, opts?: ConnectOptions): Promise<void> {
     if (status.value !== 'disconnected') return;
     status.value = 'connecting';
     kind.value = k;
     lastError.value = null;
     let t: Transport | null = null;
     try {
-      const live = factory(k);
+      const live = factory(k, opts);
       t = live;
       await live.open();
       transport.value = live;

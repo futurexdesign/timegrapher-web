@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia';
 import { createVuetify } from 'vuetify';
 import * as components from 'vuetify/components';
 import * as directives from 'vuetify/directives';
+import { useConnectionStore } from '@/stores/connection';
 import AppBarConnection from './AppBarConnection.vue';
 
 vi.stubGlobal(
@@ -49,6 +50,11 @@ describe('AppBarConnection', () => {
     wrapper = null;
     Reflect.deleteProperty(navigator, 'bluetooth');
     document.body.innerHTML = '';
+    try {
+      localStorage.clear();
+    } catch {
+      // Storage unavailable: nothing to clear.
+    }
   });
 
   it('UI-05 the menu has a Bluetooth item that is disabled without the API', async () => {
@@ -65,5 +71,23 @@ describe('AppBarConnection', () => {
     const item = await bluetoothItem();
     expect(item).toBeDefined();
     expect(item?.classList.contains('v-list-item--disabled')).toBe(false);
+  });
+
+  it('choosing Virtual device opens the picker, and Connect uses the chosen variant', async () => {
+    await bluetoothItem();
+    const connect = vi.spyOn(useConnectionStore(), 'connect').mockResolvedValue();
+    const virtual = [...document.body.querySelectorAll<HTMLElement>('.v-list-item')].find((el) =>
+      el.textContent.includes('Virtual device'),
+    );
+    virtual?.click();
+    await flushPromises();
+    expect(connect).not.toHaveBeenCalled();
+    expect(document.body.querySelector('[data-testid="virtual-picker"]')).not.toBeNull();
+    document.body
+      .querySelector<HTMLElement>('[data-testid="virtual-variant-pico2w-pcm1808"]')
+      ?.click();
+    await flushPromises();
+    document.body.querySelector<HTMLElement>('[data-testid="virtual-confirm"]')?.click();
+    expect(connect).toHaveBeenCalledWith('virtual', { virtualVariant: 'pico2w-pcm1808' });
   });
 });

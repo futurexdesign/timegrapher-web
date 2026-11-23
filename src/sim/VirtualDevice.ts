@@ -28,6 +28,7 @@ import type {
   DspError,
   DspEvent,
   DspFaultReason,
+  HidBleLinkStatus,
   HidDiag,
   HidHelloCaps,
   HidHelloControl,
@@ -147,7 +148,27 @@ export interface VirtualDeviceOptions {
   linkKind?: HidLinkKind;
   /** ATT MTU reported in `hello.link.mtu` when `linkKind` is `ble` (default 185). */
   linkMtu?: number;
+  /**
+   * Board name; `hello.board` reports it as `<board> (virtual)`. Default:
+   * `Pico2W` for a BLE build, else `Pico2`.
+   */
+  board?: string;
+  /**
+   * Build has BLE: `hello.caps.ble` is true and `getLink` carries a `ble`
+   * block. Default: `linkKind === 'ble'`, so a plain device has no BLE.
+   * `false` together with `linkKind: 'ble'` is contradictory and throws.
+   */
+  ble?: boolean;
 }
+
+/** Name the simulated radio advertises (`getLink.ble.name`). */
+const BLE_NAME = 'TG-SIM0';
+/** Fixed fake Bluetooth address of the simulated radio. */
+const BLE_ADDRESS = '00:00:00:00:51:4D';
+/** Connection interval the simulated link reports while connected (µs). */
+const BLE_CONN_INTERVAL_US = 30000;
+/** ATT MTU before the exchange completes (the BLE default). */
+const BLE_DEFAULT_MTU = 23;
 
 /** Control lease length (ms, §4.7). */
 const LEASE_MS = 10000;
@@ -254,6 +275,8 @@ export class VirtualDevice {
   /** Link the requests arrive on. */
   private readonly linkKind: HidLinkKind;
   private readonly linkMtu: number;
+  private readonly board: string;
+  private readonly hasBle: boolean;
   private readonly rng: Rng;
   private readonly hasQuartz: boolean;
   private readonly hasGps: boolean;
@@ -287,10 +310,18 @@ export class VirtualDevice {
   private pulseMeasurement = 0;
   private pulseNextSeq = 0;
 
-  /** @param options Construction options. */
+  /**
+   * @param options Construction options.
+   * @throws {RangeError} when `linkKind` is `ble` and `ble` is `false`.
+   */
   constructor(options: VirtualDeviceOptions = {}) {
     this.clock = options.clock ?? performanceClock;
     this.linkKind = options.linkKind ?? 'usbHid';
+    this.hasBle = options.ble ?? this.linkKind === 'ble';
+    if (this.linkKind === 'ble' && !this.hasBle) {
+      throw new RangeError('a device reached over BLE must be built with BLE');
+    }
+    this.board = options.board ?? (this.hasBle ? 'Pico2W' : 'Pico2');
     this.linkMtu = options.linkMtu ?? 185;
     this.rng = createRng(options.seed ?? 1);
     this.hasQuartz = options.quartz ?? true;
@@ -350,6 +381,7 @@ export class VirtualDevice {
       pps: this.hasPps,
       timebaseLog: true,
       timebaseLogMax: 24,
+      ...(this.hasBle ? { ble: true } : {}),
       pipeline: buildPipeline(this.hasQuartz),
     };
   }
@@ -789,7 +821,11 @@ export class VirtualDevice {
     // `claim` itself is resolved in `arbitrate()`, which has already made this
     // link the owner (or thrown `linkBusy`) by the time the handler runs.
     claim: () => ({ owner: this.linkKind, previous: this.claimPrevious }),
-    getLink: () => ({ usbHid: { mounted: true }, control: this.controlState() }),
+    getLink: () => ({
+      usbHid: { mounted: true },
+      ...(this.hasBle ? { ble: this.bleStatus() } : {}),
+      control: this.controlState(),
+    }),
     getDiag: () => this.diag(),
     // `t` is echoed verbatim when it is an integer within int64, else treated as missing (0).
     ping: (b) => ({
@@ -890,7 +926,7 @@ export class VirtualDevice {
     return {
       protocolVersion: 1,
       fwVersion: '0.2.0-sim',
-      board: 'Pico2 (virtual)',
+      board: `${this.board} (virtual)`,
       source: 'PCM1808',
       vid: 51966,
       pid: 16387,
@@ -903,6 +939,31 @@ export class VirtualDevice {
   /** The `hello.link` object: kind, plus the MTU on BLE. */
   private helloLink(): HidHelloLink {
     return this.linkKind === 'ble' ? { kind: 'ble', mtu: this.linkMtu } : { kind: 'usbHid' };
+  }
+
+  /**
+   * The `getLink.ble` block of a BLE build. Only one link is active at a
+   * time, so the radio is off when this device is reached over USB.
+   */
+  private bleStatus(): HidBleLinkStatus {
+    const onBle = this.linkKind === 'ble';
+    return {
+      enabled: onBle,
+      name: BLE_NAME,
+      address: BLE_ADDRESS,
+      advertising: false,
+      connected: onBle,
+      mtu: onBle ? this.linkMtu : BLE_DEFAULT_MTU,
+      connIntervalUs: onBle ? BLE_CONN_INTERVAL_US : 0,
+      rxFrames: 0,
+      txFrames: 0,
+      rxDropped: 0,
+      rxInvalid: 0,
+      txRetries: 0,
+      disconnects: 0,
+      lastDisconnectReason: 0,
+      core: 0,
+    };
   }
 
   /** Ownership as seen by the requesting link (`hello.control`, §4.6). */
