@@ -181,7 +181,9 @@ describe('BLE build option', () => {
       enabled: true,
       connected: true,
       mtu: 247,
-      connIntervalUs: 30000,
+      connIntervalUs: 15000,
+      connParamStep: 1,
+      connParamRejects: 0,
       core: 0,
     });
   });

@@ -148,12 +148,35 @@ export abstract class FramedTransport implements Transport {
    */
   protected abstract sendFrame(frame: Uint8Array<ArrayBuffer>): Promise<void>;
 
-  /** Opens the link via {@link openLink} and arms the keepalive. Idempotent while open. */
+  /**
+   * Subclass hook: runs after the link is up and requests can be sent, before
+   * {@link open} resolves. Use it for a link-level handshake that needs the
+   * request path (for example BLE's `hello {frameMax}`). The default does
+   * nothing. A rejection fails `open()`: the link is released and the transport
+   * stays closed.
+   */
+  protected async afterOpen(): Promise<void> {
+    /* no handshake by default */
+  }
+
+  /**
+   * Opens the link via {@link openLink}, runs {@link afterOpen} and arms the
+   * keepalive. Idempotent while open.
+   */
   async open(): Promise<void> {
     if (this.isOpen) return;
     await this.openLink();
     this.reassembler.reset();
     this.isOpen = true;
+    try {
+      await this.afterOpen();
+    } catch (e) {
+      if (this.stillOpen()) this.teardown(new DeviceError('disconnected', 'Open failed'), false);
+      await this.safeCloseLink();
+      throw e;
+    }
+    // A link loss during the handshake already tore everything down.
+    if (!this.stillOpen()) throw new DeviceError('disconnected', 'Link lost while opening');
     this.armKeepalive();
   }
 
@@ -259,6 +282,11 @@ export abstract class FramedTransport implements Transport {
     if (!this.isOpen) return;
     this.teardown(new DeviceError('disconnected', reason), true);
     void this.safeCloseLink();
+  }
+
+  /** @returns {@link isOpen} read afresh (TypeScript cannot see changes made during an `await`). */
+  private stillOpen(): boolean {
+    return this.isOpen;
   }
 
   /** Runs {@link closeLink}, swallowing errors (the link may already be gone). */

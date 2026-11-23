@@ -52,3 +52,14 @@ export const BLE_INFO_UUID = 'c137e7c3-92b4-4d9e-87e0-9ba757169016';
 export const BLE_NAME_PREFIX = 'TG-';
 /** Smallest ATT MTU that carries a full 63-byte frame (63 + 3 bytes ATT header = 66). */
 export const BLE_MIN_MTU = 66;
+
+/**
+ * Largest `payloadLen` the reassembler accepts (BLE_TRANSPORT_PLAN.md §14.3):
+ * a 255-byte BLE frame minus the 5-byte header. HID reports stay at 63 bytes,
+ * so the buffer length still bounds them to {@link HID_FRAME_MAX_CHUNK}.
+ */
+export const FRAME_MAX_PAYLOAD = 250;
+/** Largest frame (header plus payload) a BLE device sends after `hello.frameMax` (§14.3). */
+export const BLE_FRAME_MAX = 255;
+/** Packed beat format version this app decodes (`caps.beatsPacked`, §14.2). */
+export const BEATS_PACKED_FORMAT = 1;

@@ -17,11 +17,16 @@
  *   keepalive `ping` through the same queue as every other request.
  * - One frame per ATT value in both directions. The segmented mode of §4.5
  *   (INFO `seg:1`) is supported as a fallback.
+ * - Large TX frames (§14.3): when INFO has `txMax`, {@link WebBleTransport.afterOpen}
+ *   sends `hello {frameMax: 255}` before `open()` resolves and notification
+ *   values up to that size are accepted. Frames the host writes stay at 63
+ *   bytes (the device's RX limit). Without `txMax` the limit stays 63.
  *
  * The constructor accepts a `Bluetooth` provider and/or a chosen device so the
  * transport can be tested with the fakes in `fakeBluetooth.ts`.
  */
 import {
+  BLE_FRAME_MAX,
   BLE_INFO_UUID,
   BLE_MIN_MTU,
   BLE_NAME_PREFIX,
@@ -64,6 +69,8 @@ interface LinkInfo {
   readonly mtu: number;
   /** `true` when the device uses segmented mode (§4.5). */
   readonly segmented: boolean;
+  /** Largest `hello.frameMax` the device accepts (§14.3); `0` when INFO has no `txMax`. */
+  readonly txMax: number;
 }
 
 /**
@@ -116,6 +123,11 @@ export class WebBleTransport extends FramedTransport {
   private writer: ((value: Uint8Array<ArrayBuffer>) => Promise<void>) | null = null;
   /** Largest data bytes per ATT write in segmented mode (`mtu - 4`); 0 outside it. */
   private segmentBytes = 0;
+  /**
+   * Largest notification frame accepted, bytes: 63 until INFO shows `txMax`,
+   * then {@link BLE_FRAME_MAX} (set before the `hello` that opts in).
+   */
+  private frameMax = HID_REPORT_BYTES;
   /** Accumulator for the frame being rebuilt from segments (segmented mode only). */
   private segBuf = new Uint8Array(0);
 
@@ -149,6 +161,17 @@ export class WebBleTransport extends FramedTransport {
     }
   }
 
+  /**
+   * Opts in to large TX frames (§14.3) when INFO advertised `txMax`: one
+   * `hello {frameMax}` through the normal request path. The device answers it
+   * with the old frame size, so the reply needs no special handling; the result
+   * is not used. A failure (timeout, device error) fails `open()`.
+   */
+  protected override async afterOpen(): Promise<void> {
+    if (this.frameMax <= HID_REPORT_BYTES) return;
+    await this.request('hello', { frameMax: this.frameMax });
+  }
+
   /** Stops notifications, removes the listeners and disconnects. Idempotent. */
   protected async closeLink(): Promise<void> {
     const device = this.device;
@@ -159,6 +182,7 @@ export class WebBleTransport extends FramedTransport {
     this.writer = null;
     this.notifying = false;
     this.segBuf = new Uint8Array(0);
+    this.frameMax = HID_REPORT_BYTES;
     if (tx !== null) {
       tx.removeEventListener('characteristicvaluechanged', this.onValueChanged);
       if (wasNotifying && device?.gatt?.connected === true) {
@@ -281,6 +305,7 @@ export class WebBleTransport extends FramedTransport {
       const info = await service.getCharacteristic(BLE_INFO_UUID);
       const link = await this.readLinkInfo(info);
       this.segmentBytes = link.segmented ? Math.max(1, link.mtu - 4) : 0;
+      this.frameMax = link.txMax > 0 ? Math.min(link.txMax, BLE_FRAME_MAX) : HID_REPORT_BYTES;
       this.writer = this.pickWriter(rx);
       this.rx = rx;
       this.tx = tx;
@@ -321,8 +346,8 @@ export class WebBleTransport extends FramedTransport {
     if (value === undefined) return;
     const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
     if (this.segmentBytes === 0) {
-      // A value longer than one frame is invalid (§4.3): drop it.
-      if (bytes.length <= HID_REPORT_BYTES) this.onFrame(bytes);
+      // A value longer than the negotiated frame is invalid (§4.3): drop it.
+      if (bytes.length <= this.frameMax) this.onFrame(bytes);
       return;
     }
     this.onSegment(bytes);
@@ -342,7 +367,7 @@ export class WebBleTransport extends FramedTransport {
     const buf = new Uint8Array(prev.length + data.length);
     buf.set(prev, 0);
     buf.set(data, prev.length);
-    if (buf.length > HID_REPORT_BYTES) {
+    if (buf.length > this.frameMax) {
       this.segBuf = new Uint8Array(0);
       return;
     }
@@ -377,9 +402,10 @@ function parseInfo(value: DataView): LinkInfo {
   } catch {
     throw new DeviceError('protocol', 'Invalid BLE INFO value');
   }
-  const o = parsed as { mtu?: unknown; seg?: unknown } | null;
+  const o = parsed as { mtu?: unknown; seg?: unknown; txMax?: unknown } | null;
   if (typeof o !== 'object' || o === null || typeof o.mtu !== 'number') {
     throw new DeviceError('protocol', 'Invalid BLE INFO value');
   }
-  return { mtu: o.mtu, segmented: o.seg === 1 };
+  const txMax = typeof o.txMax === 'number' && Number.isInteger(o.txMax) ? o.txMax : 0;
+  return { mtu: o.mtu, segmented: o.seg === 1, txMax };
 }

@@ -17,6 +17,7 @@
  */
 import { computed, ref, shallowRef, watch } from 'vue';
 import { defineStore } from 'pinia';
+import { DEFAULT_SOURCE_HZ, decodeBeatsPacked } from '@/protocol/beatsPacked';
 import type { DspBeat, DspBeatRate } from '@/protocol/types';
 import type { TickPoint } from '@/utils/tickTock';
 import { useConnectionStore } from './connection';
@@ -142,6 +143,22 @@ export const useMechanicalStore = defineStore('mechanical', () => {
     if (changed) tickVersion.value++;
   }
 
+  /**
+   * Handles a `beatsPacked` notify: decodes the block and feeds it to
+   * {@link ingestBeats}, so charts see the same beats as from a `beats` notify.
+   * `tS` needs the stream's sample rate, taken from the latest `beat` snapshot
+   * ({@link DEFAULT_SOURCE_HZ} before the first one). A block that does not
+   * decode is logged and dropped; the next block continues the stream.
+   * @param p Base64 text of the block.
+   */
+  function ingestPacked(p: string): void {
+    try {
+      ingestBeats(decodeBeatsPacked(p, rate.value?.sourceHz ?? DEFAULT_SOURCE_HZ));
+    } catch (e) {
+      console.error('packed beats dropped', e);
+    }
+  }
+
   /** Clears all collected data (not the claim). */
   function clear(): void {
     rate.value = null;
@@ -218,6 +235,9 @@ export const useMechanicalStore = defineStore('mechanical', () => {
   subs.on('beats', (d) => {
     ingestBeats(d.beats);
   });
+  subs.on('beatsPacked', (d) => {
+    ingestPacked(d.p);
+  });
 
   return {
     rate,
@@ -231,6 +251,7 @@ export const useMechanicalStore = defineStore('mechanical', () => {
     uncalibrated,
     ingestRate,
     ingestBeats,
+    ingestPacked,
     clear,
     begin,
     end,

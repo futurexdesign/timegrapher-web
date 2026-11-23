@@ -20,19 +20,19 @@ They never see which implementation is behind it. `VirtualTransport` implements
 
 ## Module map
 
-| Path                          | Role                                                                                                                                                                                                                                                                               |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/protocol/`               | `timegrapher_hid.d.ts` (synced from the firmware repo, never edited), `types.ts` (re-export), `constants.ts` (runtime values, including the BLE UUIDs and `BLE_MIN_MTU`), `framer.ts` (encoder / reassembler), `messages.ts` (response / notify guards, error normalisation).      |
-| `src/transport/`              | `Transport` interface, `DeviceError` (device error codes plus client codes `timeout`, `disconnected`, `notOpen`, `protocol`, `linkUnsupported`), `FramedTransport` (base class), `WebHidTransport`, `WebBleTransport`, `fakeBluetooth.ts` (test double for the Web Bluetooth API). |
-| `src/sim/`                    | Virtual device (below).                                                                                                                                                                                                                                                            |
-| `src/stores/`                 | Pinia stores. `connection` owns the transport; `subscriptions` owns the push subscription and notify bus; the rest are feature stores.                                                                                                                                             |
-| `src/composables/`            | `usePcCalibration`: PC-assisted timebase calibration (injectable state machine, wake lock, visibility).                                                                                                                                                                            |
-| `src/views/`                  | One routed page each; they claim polling / subscriptions while mounted.                                                                                                                                                                                                            |
-| `src/components/`             | `timegrapher/`, `audio/`, `timebase/`, `settings/` plus shared `ConnectPrompt`, `AppBarConnection`.                                                                                                                                                                                |
-| `src/utils/`                  | Pure, unit-tested helpers (no Vue state): `tickTock`, `balance`, `sky`, `calibration`, `quartzPulses`, `dspMeta` (block metadata), `pipelineLayout`, `format`, `budget`, `capsChips`, `rawConsole`.                                                                                |
-| `src/router/`, `src/layouts/` | Hash-history routes (lazy views; `meta.nav` feeds the drawer) and the shell.                                                                                                                                                                                                       |
-| `src/plugins/`                | Vuetify and tree-shaken ECharts registration.                                                                                                                                                                                                                                      |
-| `tests/contract/`             | Transport contract suite plus the simulator harness.                                                                                                                                                                                                                               |
+| Path                          | Role                                                                                                                                                                                                                                                                                                                  |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/protocol/`               | `timegrapher_hid.d.ts` (synced from the firmware repo, never edited), `types.ts` (re-export), `constants.ts` (runtime values, including the BLE UUIDs and `BLE_MIN_MTU`), `framer.ts` (encoder / reassembler), `beatsPacked.ts` (packed beat decoder), `messages.ts` (response / notify guards, error normalisation). |
+| `src/transport/`              | `Transport` interface, `DeviceError` (device error codes plus client codes `timeout`, `disconnected`, `notOpen`, `protocol`, `linkUnsupported`), `FramedTransport` (base class), `WebHidTransport`, `WebBleTransport`, `fakeBluetooth.ts` (test double for the Web Bluetooth API).                                    |
+| `src/sim/`                    | Virtual device (below).                                                                                                                                                                                                                                                                                               |
+| `src/stores/`                 | Pinia stores. `connection` owns the transport; `subscriptions` owns the push subscription and notify bus; the rest are feature stores.                                                                                                                                                                                |
+| `src/composables/`            | `usePcCalibration`: PC-assisted timebase calibration (injectable state machine, wake lock, visibility).                                                                                                                                                                                                               |
+| `src/views/`                  | One routed page each; they claim polling / subscriptions while mounted.                                                                                                                                                                                                                                               |
+| `src/components/`             | `timegrapher/`, `audio/`, `timebase/`, `settings/` plus shared `ConnectPrompt`, `AppBarConnection`.                                                                                                                                                                                                                   |
+| `src/utils/`                  | Pure, unit-tested helpers (no Vue state): `tickTock`, `balance`, `sky`, `calibration`, `quartzPulses`, `dspMeta` (block metadata), `pipelineLayout`, `format`, `budget`, `capsChips`, `rawConsole`.                                                                                                                   |
+| `src/router/`, `src/layouts/` | Hash-history routes (lazy views; `meta.nav` feeds the drawer) and the shell.                                                                                                                                                                                                                                          |
+| `src/plugins/`                | Vuetify and tree-shaken ECharts registration.                                                                                                                                                                                                                                                                         |
+| `tests/contract/`             | Transport contract suite plus the simulator harness.                                                                                                                                                                                                                                                                  |
 
 ## Transport
 
@@ -74,8 +74,16 @@ repository, §4. This section describes what the web code does.
 - **Frames**: the shared encoder pads to 63 bytes for WebHID. `sendFrame` cuts
   the padding, so each ATT write is exactly `5 + payloadLen` bytes (5 to 63).
   One frame goes in one value in each direction. A received value longer than
-  63 bytes is dropped. Segmented mode (`seg: 1`, a fallback for a 23-byte MTU)
+  the negotiated frame size is dropped (63 bytes unless large frames are on,
+  see below). Segmented mode (`seg: 1`, a fallback for a 23-byte MTU)
   splits frames into `START`-flagged segments with a 1-byte header.
+- **Large frames** (plan §14.3): when INFO has `txMax`, `WebBleTransport`
+  sends `hello {frameMax: 255}` from `afterOpen()` (a `FramedTransport` hook
+  that runs before `open()` resolves) and accepts notification values up to 255
+  bytes (`BLE_FRAME_MAX`). The shared reassembler accepts `payloadLen` up to 250
+  (`FRAME_MAX_PAYLOAD`). Frames the host writes stay within 63 bytes, the
+  device's RX limit. A failed `hello` fails `open()`. A device without `txMax`
+  never sees a `hello` from the transport and keeps 63-byte frames.
 - **One GATT operation in flight**: `FramedTransport` awaits each `sendFrame`
   before it sends the next frame or request, so the browser never sees two
   overlapping GATT operations. Writes use `writeValueWithResponse` by default
@@ -110,7 +118,7 @@ the store enters `needsTakeover` and opens the takeover dialog before any other
 request is sent.
 The store exposes `status`, `hello`, `caps` and `features` (booleans derived
 from caps: `quartz`, `beats`, `deviceMode`, `gps`, `pps`, `timebaseLog`,
-`timing`, `pipeline`). Every feature-dependent UI part is gated on
+`timing`, `pipeline`, `beatsPacked`). Every feature-dependent UI part is gated on
 `features` / `caps`.
 
 ## Push data: claims and the notify bus
@@ -137,7 +145,14 @@ Claim owners in use: `timegrapher.mechanical` (`beatHz 2`, `beats`),
 `timegrapher.quartz` (`quartzHz 2`, `quartzPulses`), `metrics` (`metricsHz 5`),
 `diagnostics` (`errors`, optionally `events`).
 
-Notify handlers: `mechanical` (`beat`, `beats`), `quartz` (`quartz`,
+Packed beats (plan §14.2): consumers claim `beats: true`. When
+`caps.beatsPacked` is present, `preferPackedBeats` turns that into
+`beatsPacked: true, beats: false` on every link. `src/protocol/beatsPacked.ts`
+decodes the base64 block to `DspBeat[]` (`tS` from `getBeat.sourceHz`, 48 kHz
+until the first `beat` snapshot arrives); the `mechanical` store calls
+`ingestBeats` with the result, so charts see the same data as from `beats`.
+
+Notify handlers: `mechanical` (`beat`, `beats`, `beatsPacked`), `quartz` (`quartz`,
 `quartzPulse`) and `metrics` register at store creation or acquire; `diagnostics`
 registers `error` / `event` on `attach()` and removes them on the last
 `detach()`.
@@ -168,7 +183,8 @@ the measurement id so a colliding id on a new device still ingests pulses).
 1. `HeaderBar` Start: `mechanical.begin()` (or `quartz.begin()`) sends `start`
    through `device` and claims the subscription.
 2. `subscriptions` merges and sends `subscribe`; the device pushes `beat`
-   (about 2 Hz) and `beats` (at most 8 per notify).
+   (about 2 Hz) and `beats` (at most 8 per notify), or `beatsPacked` (one base64
+   block per notify) when the device supports it.
 3. The notify bus calls `mechanical.ingestRate` / `ingestBeats`, which append to
    capped arrays (`TREND_CAP`, `TICK_CAP`) mutated in place and bump a version
    counter. A `gridId` change clears the tick-tock trace.
@@ -197,6 +213,10 @@ cancels pending writes through a generation counter.
   drift) advance with real time scaled by `timeScale`; signal models advance
   only while capture runs. `models/` holds the mechanical watch, quartz (motor,
   LCD, tuning fork), DSP telemetry, GPS, timebase and timebase-log models;
+  `beatsPackedEncoder.ts` is the device-side packed-beat encoder (the app only
+  decodes). The device models `caps.beatsPacked`, `hello.frameMax` /
+  `link.frameMax` (BLE) and `getLink.ble.connParamStep`; the options
+  `beatsPacked: false` and `largeFrames: false` model older firmware.
   `notifier.ts` holds subscription state and periodic scheduling; `rings.ts`
   the event / error / beat logs; `dspState.ts` the `getState` / `patchState`
   merge semantics.

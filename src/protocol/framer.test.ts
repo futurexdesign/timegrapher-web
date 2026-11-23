@@ -5,6 +5,7 @@ import {
   HID_MAX_JSON_BYTES,
   HID_MAX_REQUEST_BYTES,
   HID_REPORT_BYTES,
+  FRAME_MAX_PAYLOAD,
 } from './constants';
 import { FrameEncoder, FrameReassembler, FrameTooLargeError } from './framer';
 
@@ -149,5 +150,44 @@ describe('FrameReassembler', () => {
     rx.push(reports[0]!);
     rx.reset();
     for (const r of reports.slice(1)) expect(rx.push(r).kind).toBe('pending');
+  });
+});
+
+describe('large frames (W6, BLE_TRANSPORT_PLAN.md §14.3)', () => {
+  it('LF-W1 the reassembler accepts a payloadLen of 250 and rejects 251', () => {
+    expect(FRAME_MAX_PAYLOAD).toBe(250);
+    const text = JSON.stringify({ v: 1, s: 'a'.repeat(236) });
+    expect(text.length).toBe(250);
+    const frame = new Uint8Array(255);
+    frame.set([0, 0, 0, 1, 250]);
+    frame.set(new TextEncoder().encode(text), 5);
+    const res = new FrameReassembler().push(frame);
+    expect(res.kind).toBe('message');
+    const bad = new Uint8Array(256);
+    bad.set([0, 0, 0, 1, 251]);
+    expect(new FrameReassembler().push(bad)).toEqual({ kind: 'dropped', reason: 'badHeader' });
+  });
+
+  it('LF-W2 a payloadLen beyond the buffer is still dropped', () => {
+    const frame = new Uint8Array(63);
+    frame.set([0, 0, 0, 1, 100]);
+    expect(new FrameReassembler().push(frame)).toEqual({ kind: 'dropped', reason: 'badHeader' });
+  });
+
+  it('LF-W3 the encoder splits at the requested chunk size and round-trips', () => {
+    const obj = { v: 1, s: 'b'.repeat(700) };
+    const enc = new FrameEncoder();
+    const frames = enc.encode(obj, HID_MAX_JSON_BYTES, 250);
+    expect(frames).toHaveLength(Math.ceil(JSON.stringify(obj).length / 250));
+    expect(frames[0]?.length).toBe(255);
+    const rx = new FrameReassembler();
+    let out: unknown;
+    for (const f of frames) {
+      const r = rx.push(f);
+      if (r.kind === 'message') out = r.message;
+    }
+    expect(out).toEqual(obj);
+    expect(() => enc.encode(obj, HID_MAX_JSON_BYTES, 251)).toThrow(RangeError);
+    expect(() => enc.encode(obj, HID_MAX_JSON_BYTES, 0)).toThrow(RangeError);
   });
 });

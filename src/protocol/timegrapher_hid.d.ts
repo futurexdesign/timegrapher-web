@@ -22,7 +22,10 @@ export declare const TIMEGRAPHER_BLE_SERVICE_UUID = 'c137e7c0-92b4-4d9e-87e0-9ba
 export declare const TIMEGRAPHER_BLE_RX_UUID = 'c137e7c1-92b4-4d9e-87e0-9ba757169016';
 /** Device → host (Notify): one frame per notification. */
 export declare const TIMEGRAPHER_BLE_TX_UUID = 'c137e7c2-92b4-4d9e-87e0-9ba757169016';
-/** Read: UTF-8 JSON of at most 64 bytes (`p`, `mtu`, `fmax`, `seg`). */
+/**
+ * Read: UTF-8 JSON of at most 64 bytes (`p`, `mtu`, `fmax`, `seg`, and on firmware
+ * with large frames `txMax`: the largest device-to-host frame it uses, 244).
+ */
 export declare const TIMEGRAPHER_BLE_INFO_UUID = 'c137e7c3-92b4-4d9e-87e0-9ba757169016';
 
 /**
@@ -773,6 +776,22 @@ export interface DspBeats {
  */
 export type BeatsNotifyData = DspBeats;
 
+/**
+ * Packed beats (`beatsPacked` notify, packed getBeats result): one base64
+ * string (RFC 4648, padded) of a little-endian binary block, format version
+ * caps.beatsPacked. Header: u8 fmt (1), u8 n (1..32), u32 seq0, u32 gridId,
+ * f32 nominalUs, u64 sample0, i32 k0, then n beats of 17 bytes: u8 dSeq,
+ * u8 flags (bit 0 parity, bit 1 amplitudeValid, bits 2-3 status 0 accepted /
+ * 1 started / 2 rejected), u32 dSample, u8 frac (1/256 sample; tS =
+ * (sampleIndex + frac / 256) / sourceHz), i16 dK, i32 u (0.1 us), u16 amp
+ * (0.01 deg, 0 when invalid), u16 lift (us, saturating). Deltas are against
+ * the previous beat; the first beat's deltas are 0. A batch never spans a
+ * grid or nominal change. Empty string: no beats.
+ */
+export interface DspBeatsPacked {
+  p: string;
+}
+
 /** Pipeline node group (A3). */
 export type PipelineGroup = 'analysis' | 'process' | 'source' | 'sink' | 'quartz';
 
@@ -897,6 +916,8 @@ export interface HidHelloCaps {
   beats?: boolean;
   /** Max getBeats.max (8). */
   beatsMax?: number;
+  /** Packed beats format version (1); absent = subscribe.beatsPacked and getBeats.packed do not exist. */
+  beatsPacked?: number;
   /** getGps exists AND the build has GPS_UART_RX (false: getGps replies badRequest). */
   gps?: boolean;
   /** The build has PPS_GPIO. */
@@ -921,6 +942,12 @@ export interface HidHelloLink {
   kind: HidLinkKind;
   /** Negotiated ATT MTU. Present only for `ble`. */
   mtu?: number;
+  /**
+   * Device-to-host frame size in bytes that applies to messages after this
+   * reply: 63 unless the host sent `hello {frameMax}` on BLE (BLE_CONTROL_PLANE.md
+   * §4.3a). Absent on older firmware.
+   */
+  frameMax?: number;
 }
 
 /**
@@ -969,6 +996,12 @@ export interface HidSubscription {
    * still talk to older firmware, which omits it.
    */
   beats?: boolean;
+  /**
+   * Push new beats as `beatsPacked` notifies (at most 32 per notify, oldest
+   * first); replaces `beats` while set. Needs caps.beatsPacked; typed
+   * optional for older firmware.
+   */
+  beatsPacked?: boolean;
 }
 
 /** Partial subscribe body; omitted fields leave prior values unchanged. */
@@ -1020,6 +1053,14 @@ export interface HidRequestBase extends HidEnvelopeBase {
 
 export interface HidHelloRequest extends HidRequestBase {
   op: 'hello';
+  /**
+   * BLE only: asks for device-to-host frames of up to this many bytes on this
+   * connection (BLE_TRANSPORT_PLAN.md §14.3). The device answers this hello
+   * with the old size, then uses `min(frameMax, txMax, attMtu - 3)` (INFO
+   * `txMax`, 244 on the Pico 2 W); the result's `link.frameMax` reports it.
+   * Below 63 or absent keeps the current value. Ignored on USB HID.
+   */
+  frameMax?: number;
 }
 
 export interface HidPingRequest extends HidRequestBase {
@@ -1169,13 +1210,17 @@ export interface HidStopRequest extends HidRequestBase {
 }
 
 /**
- * Result: {@link DspBeats}, newest first. The reply holds as many of the
- * requested beats as fit one message (fewer than `max` is possible).
+ * Result: {@link DspBeats}, newest first, or with `packed: true`
+ * {@link DspBeatsPacked}, newest last. The reply holds as many of the
+ * requested beats as fit one message (fewer than `max` is possible); a packed
+ * reply holds the newest batch only.
  */
 export interface HidGetBeatsRequest extends HidRequestBase {
   op: 'getBeats';
   /** 1..caps.beatsMax (8), default 8; out-of-range values are clamped. */
   max?: number;
+  /** Return the packed form (needs caps.beatsPacked); `max` then goes up to 32. */
+  packed?: boolean;
 }
 
 /** Result: {@link GpsInfo}. `badRequest` "GPS not built in" when caps.gps is false. */
@@ -1244,6 +1289,13 @@ export interface HidBleLinkStatus {
   mtu: number;
   /** Current connection interval (µs). */
   connIntervalUs: number;
+  /**
+   * Progress of the device's connection-interval request: 0 none yet, 1 asked
+   * for 15 ms, 2 asked for 15 to 30 ms after a rejection, 3 gave up.
+   */
+  connParamStep: 0 | 1 | 2 | 3;
+  /** Connection-parameter requests the central rejected. */
+  connParamRejects: number;
   /** Frames received on RX. */
   rxFrames: number;
   /** Frames sent on TX. */
@@ -1509,6 +1561,12 @@ export interface HidBeatsNotify extends HidNotifyBase {
   data: BeatsNotifyData;
 }
 
+/** New beats in the packed format, oldest first (subscribe.beatsPacked). */
+export interface HidBeatsPackedNotify extends HidNotifyBase {
+  op: 'beatsPacked';
+  data: DspBeatsPacked;
+}
+
 /**
  * Sent to the previous owner when another link takes control (`claim` with
  * `takeover`, or an auto-claim after the lease expired), if its link is still
@@ -1529,6 +1587,7 @@ export type HidNotify =
   | HidQuartzNotify
   | HidQuartzPulseNotify
   | HidBeatsNotify
+  | HidBeatsPackedNotify
   | HidControlReleasedNotify;
 
 /** Any device → host JSON message. */
@@ -1584,7 +1643,7 @@ export interface HidResultMap {
   setDevice: DeviceStatus;
   start: DeviceStatus;
   stop: DeviceStatus;
-  getBeats: DspBeats;
+  getBeats: DspBeats | DspBeatsPacked;
   getGps: GpsInfo;
   getTimebaseLog: TimebaseLog;
   clearTimebaseLog: TimebaseLog;
@@ -1603,5 +1662,6 @@ export interface HidNotifyDataMap {
   quartz: DspQuartz;
   quartzPulse: DspQuartzPulse;
   beats: BeatsNotifyData;
+  beatsPacked: DspBeatsPacked;
   controlReleased: { to: HidLinkKind };
 }

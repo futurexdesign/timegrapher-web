@@ -3,7 +3,7 @@
  * {@link Transport}: run control + subscription claims, beat ingest ordering,
  * grid restarts and series caps.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nextTick } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
 import type {
@@ -17,6 +17,7 @@ import type {
   RequestOf,
   ResultOf,
 } from '@/protocol/types';
+import { packBeats } from '@/sim/beatsPackedEncoder';
 import type { NotifyListener, Transport } from '@/transport/Transport';
 import { useConnectionStore } from './connection';
 import { useDeviceStore } from './device';
@@ -199,6 +200,40 @@ describe('mechanical store', () => {
     expect(mech.ticks.map((p) => p.seq)).toEqual([0, 1, 2]);
     mech.ingestBeats([beat(1), beat(3)]);
     expect(mech.ticks.map((p) => p.seq)).toEqual([0, 1, 2, 3]);
+  });
+
+  it('PK-13 decodes a beatsPacked notify into the same tick points as beats', async () => {
+    const t = await setup();
+    const mech = useMechanicalStore();
+    const beats = [0, 1, 2].map((i) => beat(i, { sampleIndex: String(i * 6000), tS: i * 0.125 }));
+    t.emit({
+      v: 1,
+      notify: true,
+      op: 'beatsPacked',
+      data: { p: packBeats(beats, 48000).p },
+    } as unknown as HidNotify);
+    expect(mech.ticks.map((p) => p.seq)).toEqual([0, 1, 2]);
+    expect(mech.ticks[2]?.tS).toBeCloseTo(0.25, 9);
+    expect(mech.ticks[1]?.parity).toBe(1);
+  });
+
+  it('PK-14 uses the sourceHz of the latest beat snapshot for tS', () => {
+    setActivePinia(createPinia());
+    const mech = useMechanicalStore();
+    mech.ingestRate(rate({ sourceHz: 44100 }));
+    mech.ingestPacked(packBeats([beat(0, { sampleIndex: '44100', tS: 1 })], 44100).p);
+    expect(mech.ticks[0]?.tS).toBeCloseTo(1, 9);
+  });
+
+  it('PK-15 drops an undecodable block and keeps the stream', () => {
+    setActivePinia(createPinia());
+    const mech = useMechanicalStore();
+    const err = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mech.ingestBeats([beat(0)]);
+    mech.ingestPacked('AgA=');
+    expect(err).toHaveBeenCalled();
+    expect(mech.ticks.map((p) => p.seq)).toEqual([0]);
+    err.mockRestore();
   });
 
   it('flags rejected beats', () => {

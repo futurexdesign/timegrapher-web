@@ -19,7 +19,7 @@ import { createVirtualTransport, type VirtualVariantId } from '@/sim'; // FACTOR
 import { DeviceError, type Transport, type TransportKind } from '@/transport/Transport';
 import { WebBleTransport, isWebBleAvailable, isWebBleSupported } from '@/transport/WebBleTransport';
 import { WebHidTransport, isWebHidSupported } from '@/transport/WebHidTransport';
-import { HID_PROTOCOL_VERSION } from '@/protocol/constants';
+import { BEATS_PACKED_FORMAT, HID_PROTOCOL_VERSION } from '@/protocol/constants';
 import { useSnackbarStore } from './snackbar';
 
 /**
@@ -93,6 +93,8 @@ export const defaultTransportFactory: TransportFactory = (kind, opts) => {
 export interface FeatureFlags {
   quartz: boolean;
   beats: boolean;
+  /** Packed beat notifies exist (`caps.beatsPacked`, BLE_TRANSPORT_PLAN.md §14.2). */
+  beatsPacked: boolean;
   deviceMode: boolean;
   gps: boolean;
   pps: boolean;
@@ -104,6 +106,7 @@ export interface FeatureFlags {
 const NO_FEATURES: FeatureFlags = {
   quartz: false,
   beats: false,
+  beatsPacked: false,
   deviceMode: false,
   gps: false,
   pps: false,
@@ -121,6 +124,7 @@ export function deriveFeatures(caps: HidHelloCaps | null): FeatureFlags {
   return {
     quartz: caps.quartz,
     beats: caps.beats === true,
+    beatsPacked: (caps.beatsPacked ?? 0) >= BEATS_PACKED_FORMAT,
     deviceMode: caps.deviceMode === true,
     gps: caps.gps === true,
     pps: caps.pps === true,

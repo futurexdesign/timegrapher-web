@@ -156,6 +156,11 @@ sends a keepalive `ping` every 3 s, so it keeps control.
 - **MTU of at least 66 bytes is required.** Each control frame is up to 63 bytes
   and needs an ATT MTU of 66. If the browser or OS negotiates less, the app
   refuses the connection and shows `BLE link MTU <n> is below 66`.
+- **Large frames and packed beats.** A stand that advertises `txMax` in INFO
+  gets `hello {frameMax: 255}` right after the connection opens, so replies and
+  notifies use frames of up to 255 bytes. With `caps.beatsPacked` the app
+  subscribes to `beatsPacked` (all beats of a notify in one base64 block) on both
+  links. Older firmware keeps 63-byte frames and the JSON `beats` stream.
 - Bluetooth has not yet been run against real hardware (see Known limitations).
 
 ## Simulator
@@ -283,7 +288,7 @@ index.html, vite.config.ts, tsconfig.json, eslint.config.js, .prettierrc.json
 scripts/sync-types.mjs      protocol type sync
 src/
   main.ts, App.vue          entry and root component (v-app, global snackbar, theme)
-  protocol/                 timegrapher_hid.d.ts (synced), types, constants, framer, messages
+  protocol/                 timegrapher_hid.d.ts (synced), types, constants, framer, beatsPacked, messages
   transport/                Transport interface + DeviceError, FramedTransport (base),
                             WebHidTransport, WebBleTransport
   sim/                      virtual device: VirtualTransport, VirtualDevice, scenarios

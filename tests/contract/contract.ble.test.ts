@@ -13,6 +13,12 @@ runTransportContract(() => createBleSimHarness({ mtu: 185 }));
 // CT-BLE-02: the same suite at the smallest supported MTU (66).
 runTransportContract(() => createBleSimHarness({ mtu: 66 }));
 
+// CT-BLE-04: an old device (no txMax, 63-byte frames, no packed beats) still passes it.
+runTransportContract(() => createBleSimHarness({ mtu: 185, modern: false }));
+
+// CT-BLE-05: a new device at the widest MTU, so 255-byte frames are in use.
+runTransportContract(() => createBleSimHarness({ mtu: 258 }));
+
 describe('ble link behaviour under contract timing', () => {
   it('CT-BLE-03 dropping the link mid-getState rejects with disconnected and disposes cleanly', async () => {
     const h = createBleSimHarness();

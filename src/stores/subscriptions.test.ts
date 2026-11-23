@@ -10,6 +10,7 @@ import {
   clampToLink,
   diffSubscription,
   mergeClaims,
+  preferPackedBeats,
   useSubscriptionsStore,
 } from './subscriptions';
 
@@ -24,6 +25,7 @@ describe('mergeClaims', () => {
       errors: false,
       quartzPulses: false,
       beats: false,
+      beatsPacked: false,
     });
   });
 
@@ -118,5 +120,56 @@ describe('link rate caps (SUB-01..03)', () => {
     useConnectionStore().ownershipEpoch++;
     await flushPromises();
     expect(request).toHaveBeenCalledWith('subscribe', { metricsHz: 5 });
+  });
+});
+
+describe('packed beats subscription (W6)', () => {
+  /** Connects with `caps` and returns the request spy. */
+  async function connectWithCaps(
+    kind: TransportKind,
+    caps: object,
+  ): Promise<ReturnType<typeof vi.fn>> {
+    const hello = { protocolVersion: 1, fwVersion: '1', board: 'Pico2', caps } as HidHelloResult;
+    const request = vi.fn((op: string, body?: object) =>
+      Promise.resolve(op === 'hello' ? hello : { ...body }),
+    );
+    const t: Transport = {
+      kind,
+      open: () => Promise.resolve(),
+      close: () => Promise.resolve(),
+      request: request as unknown as Transport['request'],
+      onNotify: () => () => undefined,
+      onDisconnect: () => () => undefined,
+    };
+    const connection = useConnectionStore();
+    connection.setTransportFactory(() => t);
+    await connection.connect(kind);
+    return request;
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('PK-10 preferPackedBeats swaps beats for beatsPacked only when supported', () => {
+    const sub = mergeClaims([{ beats: true, beatHz: 2 }]);
+    expect(preferPackedBeats(sub, true)).toMatchObject({ beats: false, beatsPacked: true });
+    expect(preferPackedBeats(sub, false)).toMatchObject({ beats: true, beatsPacked: false });
+    expect(preferPackedBeats(mergeClaims([]), true).beatsPacked).toBe(false);
+  });
+
+  it.each<TransportKind>(['webhid', 'webble'])(
+    'PK-11 subscribes with beatsPacked instead of beats when caps.beatsPacked is set (%s)',
+    async (kind) => {
+      const request = await connectWithCaps(kind, { beats: true, beatsPacked: 1 });
+      await useSubscriptionsStore().claim('t', { beats: true });
+      expect(request).toHaveBeenCalledWith('subscribe', { beatsPacked: true });
+    },
+  );
+
+  it('PK-12 keeps beats: true on a device without caps.beatsPacked', async () => {
+    const request = await connectWithCaps('webble', { beats: true });
+    await useSubscriptionsStore().claim('t', { beats: true });
+    expect(request).toHaveBeenCalledWith('subscribe', { beats: true });
   });
 });

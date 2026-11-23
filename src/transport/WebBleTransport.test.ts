@@ -11,7 +11,7 @@ import {
   BLE_TX_UUID,
   HID_REPORT_BYTES,
 } from '@/protocol/constants';
-import { FrameEncoder } from '@/protocol/framer';
+import { FrameEncoder, FrameReassembler } from '@/protocol/framer';
 import type { HidNotify } from '@/protocol/types';
 import { DeviceError } from './Transport';
 import {
@@ -27,14 +27,42 @@ import {
   type WebBleTransportOptions,
 } from './WebBleTransport';
 
-/** A fake stack plus a transport over it. Keepalive is off unless a test enables it. */
+/**
+ * A fake stack plus a transport over it. Keepalive is off unless a test enables it.
+ * The device is an old one (no INFO `txMax`, 63-byte frames) unless the test
+ * sets `deviceOptions.largeFrames`; the large-frame tests (LF-*) use {@link setupLarge}.
+ */
 function setup(
   peripheral: FakePeripheralOptions = {},
   options: Partial<WebBleTransportOptions> = {},
 ) {
-  const bt = new FakeBluetooth(new FakePeripheral({ pollMs: 0, ...peripheral }));
+  const bt = new FakeBluetooth(
+    new FakePeripheral({
+      pollMs: 0,
+      ...peripheral,
+      deviceOptions: { largeFrames: false, ...peripheral.deviceOptions },
+    }),
+  );
   const t = new WebBleTransport({ bluetooth: bt.api, keepaliveMs: 0, ...options });
   return { bt, p: bt.peripheral, t };
+}
+
+/**
+ * Like {@link setup}, but the device is a new one: INFO has `txMax` and
+ * `hello.frameMax` is honoured. The MTU defaults to 258 so a 255-byte frame fits.
+ */
+function setupLarge(
+  peripheral: FakePeripheralOptions = {},
+  options: Partial<WebBleTransportOptions> = {},
+) {
+  return setup(
+    {
+      mtu: 258, // 255 + 3: room for the largest frame
+      ...peripheral,
+      deviceOptions: { largeFrames: true, ...peripheral.deviceOptions },
+    },
+    options,
+  );
 }
 
 /** Lets fake time pass in 1 ms steps until `p` settles (max 10 s), then returns it. */
@@ -507,5 +535,135 @@ describe('WebBleTransport extras', () => {
     x.bt.chooserCancelled = true;
     await errorOf(x.t.open());
     expect(x.bt.requestDeviceCalls).toHaveLength(1);
+  });
+});
+
+/** Records the byte length of every notification value delivered on TX. */
+function recordNotifyLengths(p: FakePeripheral): number[] {
+  const lengths: number[] = [];
+  p.tx?.addEventListener('characteristicvaluechanged', () => {
+    lengths.push(p.tx?.value?.byteLength ?? 0);
+  });
+  return lengths;
+}
+
+describe('WebBleTransport large frames (W6, BLE_TRANSPORT_PLAN.md §14.3)', () => {
+  it('LF-W4 a device with txMax gets hello {frameMax: 255} before open() resolves', async () => {
+    const { p, t } = setupLarge();
+    await settle(t.open());
+    expect(p.requests.map((r) => r.op)).toEqual(['hello']);
+    expect(p.txFrameBytes).toBe(255);
+    const w = p.rxWrites[0] ?? new Uint8Array();
+    expect(w.length).toBeLessThanOrEqual(HID_REPORT_BYTES);
+    const msg = new FrameReassembler().push(w);
+    expect(msg).toMatchObject({ kind: 'message', message: { op: 'hello', frameMax: 255 } });
+  });
+
+  it('LF-W5 replies after the opt-in use frames up to 255 bytes', async () => {
+    const { p, t } = setupLarge({ pollMs: 0 });
+    await settle(t.open());
+    const lengths = recordNotifyLengths(p);
+    const state = await settle(t.request('getState'));
+    expect(state).toHaveProperty('bypass');
+    const max = Math.max(...lengths);
+    expect(max).toBeGreaterThan(HID_REPORT_BYTES);
+    expect(max).toBeLessThanOrEqual(255);
+    // Every frame but the last is full: 5 header bytes plus 250 payload bytes.
+    expect(lengths.slice(0, -1).every((n) => n === 255)).toBe(true);
+  });
+
+  it('LF-W6 requests the host writes stay within 63 bytes', async () => {
+    const { p, t } = setupLarge();
+    await settle(t.open());
+    await settle(t.request('ping', { t: 1, pad: 'x'.repeat(300) } as never));
+    expect(p.rxWrites.length).toBeGreaterThan(2);
+    expect(p.rxWrites.every((w) => w.length <= HID_REPORT_BYTES)).toBe(true);
+    expect(p.rxDropped).toBe(0);
+  });
+
+  it('LF-W7 an old device (no txMax) gets no hello and keeps 63-byte frames', async () => {
+    const { p, t } = setup();
+    await settle(t.open());
+    expect(p.requests).toEqual([]);
+    const lengths = recordNotifyLengths(p);
+    await settle(t.request('getState'));
+    expect(lengths.length).toBeGreaterThan(3);
+    expect(Math.max(...lengths)).toBeLessThanOrEqual(HID_REPORT_BYTES);
+  });
+
+  it('LF-W8 a large notification value is dropped on an old device but accepted on a new one', async () => {
+    const frame = (): Uint8Array => {
+      const text = JSON.stringify({
+        v: 1,
+        notify: true,
+        op: 'metrics',
+        data: { pad: 'x'.repeat(150) },
+      });
+      const f = new Uint8Array(5 + text.length);
+      f.set([0, 0, 0, 1, text.length]);
+      f.set(new TextEncoder().encode(text), 5);
+      return f;
+    };
+    const old = setup();
+    await settle(old.t.open());
+    const oldGot: HidNotify[] = [];
+    old.t.onNotify((n) => oldGot.push(n));
+    old.p.notifyRaw(frame());
+    await vi.advanceTimersByTimeAsync(1);
+    expect(oldGot).toHaveLength(0);
+
+    const large = setupLarge();
+    await settle(large.t.open());
+    const got: HidNotify[] = [];
+    large.t.onNotify((n) => got.push(n));
+    large.p.notifyRaw(frame());
+    await vi.advanceTimersByTimeAsync(1);
+    expect(got).toHaveLength(1);
+    // Above the negotiated 255 bytes the value is invalid again.
+    large.p.notifyRaw(new Uint8Array(256));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(got).toHaveLength(1);
+  });
+
+  it('LF-W9 at the minimum MTU the device keeps 63-byte frames after the hello', async () => {
+    const { p, t } = setupLarge({ mtu: 66 });
+    await settle(t.open());
+    expect(p.requests.map((r) => r.op)).toEqual(['hello']);
+    expect(p.txFrameBytes).toBe(63);
+    const lengths = recordNotifyLengths(p);
+    await settle(t.request('getState'));
+    expect(Math.max(...lengths)).toBeLessThanOrEqual(HID_REPORT_BYTES);
+  });
+
+  it('LF-W12 the device limits its frames to the MTU minus the 3-byte ATT header', async () => {
+    const { p, t } = setupLarge({ mtu: 185 });
+    await settle(t.open());
+    expect(p.txFrameBytes).toBe(182);
+    const lengths = recordNotifyLengths(p);
+    await settle(t.request('getState'));
+    expect(Math.max(...lengths)).toBe(182);
+  });
+
+  it('LF-W10 a hello that gets no answer fails open() and releases the link', async () => {
+    const { bt, p, t } = setupLarge();
+    p.autoReply = false;
+    const e = await errorOf(t.open());
+    expect(e.code).toBe('timeout');
+    expect(bt.device.gatt.connected).toBe(false);
+    expect((await errorOf(t.request('ping'))).code).toBe('notOpen');
+  });
+
+  it('LF-W11 a dropped link resets the frame size; a reconnect negotiates again', async () => {
+    const { p, t } = setupLarge();
+    await settle(t.open());
+    expect(p.txFrameBytes).toBe(255);
+    p.dropLink();
+    expect(p.txFrameBytes).toBe(63);
+    const t2 = new WebBleTransport({
+      bluetooth: new FakeBluetooth(p).api,
+      keepaliveMs: 0,
+    });
+    await settle(t2.open());
+    expect(p.txFrameBytes).toBe(255);
   });
 });

@@ -25,6 +25,8 @@ import type {
   DeviceStreamState,
   DspBeat,
   DspBeatRate,
+  DspBeats,
+  DspBeatsPacked,
   DspError,
   DspEvent,
   DspFaultReason,
@@ -49,6 +51,7 @@ import type {
   TimebaseLogEntry,
 } from '@/protocol/types';
 import type { DspBlockKey } from '@/protocol/types';
+import { BEATS_PACKED_FORMAT } from '@/protocol/constants';
 import { DeviceError } from '@/transport/Transport';
 import { performanceClock, type Clock } from './clock';
 import { BLOCK_ORDER, DspStateStore } from './dspState';
@@ -72,6 +75,7 @@ import { LOG_DELTA_RANGE, TimebaseLogModel, ppsDecision } from './models/timebas
 import { SubscriptionState, type RateCaps } from './notifier';
 import { createRng, type Rng } from './rng';
 import { REPLY_ENVELOPE_BYTES, HID_JSON_MAX, fitCount, notifyEnvelopeBytes } from './wire';
+import { packBeats } from './beatsPackedEncoder';
 import { NumberedRing } from './rings';
 
 /** Faults a scenario can switch on. */
@@ -159,14 +163,32 @@ export interface VirtualDeviceOptions {
    * `false` together with `linkKind: 'ble'` is contradictory and throws.
    */
   ble?: boolean;
+  /**
+   * Build speaks the packed beat format (BLE_TRANSPORT_PLAN.md §14.2):
+   * `caps.beatsPacked`, `subscribe.beatsPacked` and `getBeats.packed`. Default
+   * `true`; `false` models older firmware.
+   */
+  beatsPacked?: boolean;
+  /**
+   * Build accepts `hello.frameMax` on BLE (§14.3) and reports `link.frameMax`.
+   * Default `true`; `false` models older firmware, which ignores the field.
+   * Has no effect on a USB link.
+   */
+  largeFrames?: boolean;
 }
 
 /** Name the simulated radio advertises (`getLink.ble.name`). */
 const BLE_NAME = 'TG-SIM0';
 /** Fixed fake Bluetooth address of the simulated radio. */
 const BLE_ADDRESS = '00:00:00:00:51:4D';
-/** Connection interval the simulated link reports while connected (µs). */
-const BLE_CONN_INTERVAL_US = 30000;
+/** Connection interval the simulated link reports while connected (µs): the 15 ms request of §14.4 was accepted. */
+const BLE_CONN_INTERVAL_US = 15000;
+/** TX frame size before any `hello.frameMax` (the HID report size, bytes). */
+const DEFAULT_TX_FRAME = 63;
+/** Largest TX frame a BLE client can ask for (§14.3). */
+export const MAX_TX_FRAME = 255;
+/** Beats per packed block the simulator sends (the `caps.beatsMax` of the JSON stream). */
+const PACKED_BATCH = 8;
 /** ATT MTU before the exchange completes (the BLE default). */
 const BLE_DEFAULT_MTU = 23;
 
@@ -277,6 +299,10 @@ export class VirtualDevice {
   private readonly linkMtu: number;
   private readonly board: string;
   private readonly hasBle: boolean;
+  private readonly hasPackedBeats: boolean;
+  private readonly hasLargeFrames: boolean;
+  /** TX frame size in use on the link, bytes (§14.3). */
+  private txFrame = DEFAULT_TX_FRAME;
   private readonly rng: Rng;
   private readonly hasQuartz: boolean;
   private readonly hasGps: boolean;
@@ -318,6 +344,8 @@ export class VirtualDevice {
     this.clock = options.clock ?? performanceClock;
     this.linkKind = options.linkKind ?? 'usbHid';
     this.hasBle = options.ble ?? this.linkKind === 'ble';
+    this.hasPackedBeats = options.beatsPacked ?? true;
+    this.hasLargeFrames = options.largeFrames ?? true;
     if (this.linkKind === 'ble' && !this.hasBle) {
       throw new RangeError('a device reached over BLE must be built with BLE');
     }
@@ -364,6 +392,7 @@ export class VirtualDevice {
       ...RATE_CAPS,
       quartz: this.hasQuartz,
       beats: true,
+      beatsPacked: this.hasPackedBeats,
     };
     this.subscriptionCaps = rateCaps;
     this.subscription = new SubscriptionState(rateCaps);
@@ -377,6 +406,7 @@ export class VirtualDevice {
       deviceMode: true,
       beats: true,
       beatsMax: BEATS_MAX,
+      ...(this.hasPackedBeats ? { beatsPacked: BEATS_PACKED_FORMAT } : {}),
       gps: this.hasGps,
       pps: this.hasPps,
       timebaseLog: true,
@@ -384,6 +414,21 @@ export class VirtualDevice {
       ...(this.hasBle ? { ble: true } : {}),
       pipeline: buildPipeline(this.hasQuartz),
     };
+  }
+
+  /** @returns The TX frame size in use on the link, bytes (63 until `hello.frameMax`, §14.3). */
+  get txFrameBytes(): number {
+    return this.txFrame;
+  }
+
+  /** @returns `true` when the device accepts `hello.frameMax` on a BLE link (INFO `txMax`). */
+  get acceptsFrameMax(): boolean {
+    return this.hasLargeFrames && this.linkKind === 'ble';
+  }
+
+  /** Returns the TX frame size to 63 bytes, as a dropped BLE link does (§14.3). */
+  resetTxFrame(): void {
+    this.txFrame = DEFAULT_TX_FRAME;
   }
 
   // --- Scenario-facing accessors -------------------------------------------------
@@ -781,7 +826,14 @@ export class VirtualDevice {
         return { v: 1, notify: true, op: 'error', data: e };
       }
     }
-    if (f.beats) {
+    if (f.beatsPacked) {
+      const cand = this.beats.since(this.beatCursor, PACKED_BATCH).values;
+      if (cand.length > 0) {
+        const { p, count } = packBeats(cand, this.sourceHz(), PACKED_BATCH);
+        this.beatCursor = this.beats.since(this.beatCursor, count).next;
+        return { v: 1, notify: true, op: 'beatsPacked', data: { p } };
+      }
+    } else if (f.beats) {
       const r = this.beats.since(this.beatCursor, 8);
       if (r.values.length > 0) {
         this.beatCursor = r.next;
@@ -817,7 +869,7 @@ export class VirtualDevice {
   }
 
   private readonly handlers: { [O in OpName]: (body: RequestOf<O>) => ResultOf<O> } = {
-    hello: () => this.hello(),
+    hello: (b) => this.hello(b),
     // `claim` itself is resolved in `arbitrate()`, which has already made this
     // link the owner (or thrown `linkBusy`) by the time the handler runs.
     claim: () => ({ owner: this.linkKind, previous: this.claimPrevious }),
@@ -905,7 +957,7 @@ export class VirtualDevice {
       this.afterRunChange();
       return this.status();
     },
-    getBeats: (b) => ({ beats: this.beats.newest(this.clampInt(b.max, 1, BEATS_MAX, 8)) }),
+    getBeats: (b) => this.getBeats(b),
     getGps: () => this.getGps(),
     getTimebaseLog: (b) => this.timebaseLog(b),
     clearTimebaseLog: () => this.clearTimebaseLog(),
@@ -922,7 +974,35 @@ export class VirtualDevice {
     return Math.min(hi, Math.max(lo, Math.trunc(v)));
   }
 
-  private hello(): HidHelloResult {
+  /**
+   * `getBeats`: the newest beats, newest first, or with `packed` (and
+   * `caps.beatsPacked`) one block, newest last. A block holds one grid, so
+   * when the newest beats span a grid change the block is the newest run only.
+   * An empty ring gives an empty block text.
+   */
+  private getBeats(b: RequestOf<'getBeats'>): DspBeats | DspBeatsPacked {
+    const newest = this.beats.newest(this.clampInt(b.max, 1, BEATS_MAX, 8));
+    if (b.packed !== true || !this.hasPackedBeats) return { beats: newest };
+    let rest = newest.reverse();
+    let last = '';
+    while (rest.length > 0) {
+      const { p, count } = packBeats(rest, this.sourceHz(), PACKED_BATCH);
+      last = p;
+      rest = rest.slice(count);
+    }
+    return { p: last };
+  }
+
+  /**
+   * Handles `hello`. On a BLE build that accepts large frames, `frameMax`
+   * sets the TX frame size for the rest of the connection:
+   * `min(frameMax, 255, mtu - 3)`, never below 63 bytes.
+   */
+  private hello(b: RequestOf<'hello'>): HidHelloResult {
+    if (this.linkKind === 'ble' && this.hasLargeFrames && typeof b.frameMax === 'number') {
+      const want = Number.isFinite(b.frameMax) ? Math.trunc(b.frameMax) : DEFAULT_TX_FRAME;
+      this.txFrame = Math.max(DEFAULT_TX_FRAME, Math.min(want, MAX_TX_FRAME, this.linkMtu - 3));
+    }
     return {
       protocolVersion: 1,
       fwVersion: '0.2.0-sim',
@@ -938,7 +1018,10 @@ export class VirtualDevice {
 
   /** The `hello.link` object: kind, plus the MTU on BLE. */
   private helloLink(): HidHelloLink {
-    return this.linkKind === 'ble' ? { kind: 'ble', mtu: this.linkMtu } : { kind: 'usbHid' };
+    if (this.linkKind !== 'ble') return { kind: 'usbHid' };
+    return this.hasLargeFrames
+      ? { kind: 'ble', mtu: this.linkMtu, frameMax: this.txFrame }
+      : { kind: 'ble', mtu: this.linkMtu };
   }
 
   /**
@@ -955,6 +1038,8 @@ export class VirtualDevice {
       connected: onBle,
       mtu: onBle ? this.linkMtu : BLE_DEFAULT_MTU,
       connIntervalUs: onBle ? BLE_CONN_INTERVAL_US : 0,
+      connParamStep: onBle ? 1 : 0,
+      connParamRejects: 0,
       rxFrames: 0,
       txFrames: 0,
       rxDropped: 0,

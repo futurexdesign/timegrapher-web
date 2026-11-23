@@ -14,11 +14,11 @@
 import {
   HID_FRAME_FLAG_MORE,
   HID_FRAME_HEADER_BYTES,
+  FRAME_MAX_PAYLOAD,
   HID_FRAME_MAX_CHUNK,
   HID_MAX_FRAGMENTS,
   HID_MAX_REQUEST_BYTES,
   HID_REASSEMBLY_TIMEOUT_MS,
-  HID_REPORT_BYTES,
 } from './constants';
 
 /** Thrown by {@link FrameEncoder.encode} when a request exceeds the request cap (2030 bytes). */
@@ -47,22 +47,33 @@ export class FrameEncoder {
   /**
    * Serialises `obj` to JSON and fragments it.
    * @param obj Any JSON-serialisable value (a request envelope).
-   * @returns One 63-byte buffer per fragment, zero padded, ready for
+   * @returns One buffer per fragment (63 bytes by default), zero padded, ready for
    *   `device.sendReport(HID_REPORT_ID, buffer)`.
    * @param maxBytes Size cap of the UTF-8 JSON (default {@link HID_MAX_REQUEST_BYTES}:
    *   the device silently drops longer requests, so they are refused here).
+   * @param chunkBytes Payload bytes per frame (default {@link HID_FRAME_MAX_CHUNK}, 58).
+   *   The host always sends 58; larger values model a BLE device that applied
+   *   `hello.frameMax` (§14.3) and produce frames of `5 + chunkBytes` bytes.
    * @throws {FrameTooLargeError} when the UTF-8 JSON exceeds `maxBytes`.
+   * @throws {RangeError} when `chunkBytes` is outside 1..{@link FRAME_MAX_PAYLOAD}.
    */
-  encode(obj: unknown, maxBytes: number = HID_MAX_REQUEST_BYTES): Uint8Array<ArrayBuffer>[] {
+  encode(
+    obj: unknown,
+    maxBytes: number = HID_MAX_REQUEST_BYTES,
+    chunkBytes: number = HID_FRAME_MAX_CHUNK,
+  ): Uint8Array<ArrayBuffer>[] {
+    if (!Number.isInteger(chunkBytes) || chunkBytes < 1 || chunkBytes > FRAME_MAX_PAYLOAD) {
+      throw new RangeError(`chunkBytes ${chunkBytes} outside 1..${FRAME_MAX_PAYLOAD}`);
+    }
     const text = new TextEncoder().encode(JSON.stringify(obj));
     if (text.length > maxBytes) throw new FrameTooLargeError(text.length, maxBytes);
-    const fragCount = Math.max(1, Math.ceil(text.length / HID_FRAME_MAX_CHUNK));
+    const fragCount = Math.max(1, Math.ceil(text.length / chunkBytes));
     const seq = this.seq;
     this.seq = (this.seq + 1) & 0xff;
     const reports: Uint8Array<ArrayBuffer>[] = [];
     for (let i = 0; i < fragCount; i++) {
-      const chunk = text.subarray(i * HID_FRAME_MAX_CHUNK, (i + 1) * HID_FRAME_MAX_CHUNK);
-      const buf = new Uint8Array(HID_REPORT_BYTES);
+      const chunk = text.subarray(i * chunkBytes, (i + 1) * chunkBytes);
+      const buf = new Uint8Array(HID_FRAME_HEADER_BYTES + chunkBytes);
       buf[0] = i + 1 < fragCount ? HID_FRAME_FLAG_MORE : 0;
       buf[1] = seq;
       buf[2] = i;
@@ -84,7 +95,7 @@ export type PushResult =
 /** Why a report or message was discarded. */
 export type DropReason =
   | 'short' // fewer than 5 header bytes
-  | 'badHeader' // fragCount 0 / too large, payloadLen > 58 or beyond the buffer
+  | 'badHeader' // fragCount 0 / too large, payloadLen > 250 or beyond the buffer
   | 'badIndex' // fragIndex >= fragCount
   | 'duplicate' // fragment already received
   | 'badJson'; // reassembled bytes are not valid JSON
@@ -133,7 +144,7 @@ export class FrameReassembler {
     if (
       fragCount < 1 ||
       fragCount > HID_MAX_FRAGMENTS ||
-      payloadLen > HID_FRAME_MAX_CHUNK ||
+      payloadLen > FRAME_MAX_PAYLOAD ||
       HID_FRAME_HEADER_BYTES + payloadLen > u8.length
     ) {
       return { kind: 'dropped', reason: 'badHeader' };

@@ -108,6 +108,14 @@ export class FakePeripheral {
   readonly name: string;
   /** ATT MTU reported by INFO and `hello.link.mtu`. */
   mtu: number;
+  /**
+   * @returns The TX frame size the device currently uses, bytes (63 for an old
+   *   device or before the `hello` that opts in).
+   */
+  get txFrameBytes(): number {
+    return this.txFrame;
+  }
+
   /** Segmented mode flag reported by INFO. */
   segmented: boolean;
   /** Duration of every GATT operation (ms). */
@@ -137,6 +145,8 @@ export class FakePeripheral {
 
   private readonly pollMs: number;
   private readonly encoder = new FrameEncoder();
+  /** TX frame size in use, bytes: 63 until a `hello.frameMax` was answered (§14.3). */
+  private txFrame = HID_REPORT_BYTES;
   private reassembler = new FrameReassembler();
   private segBuf = new Uint8Array(0);
   private failNext: string | null = null;
@@ -185,7 +195,7 @@ export class FakePeripheral {
     let frames: Uint8Array[];
     const wire: unknown = JSON.parse(JSON.stringify(obj, sixSig));
     try {
-      frames = this.encoder.encode(wire, REPLY_CAP_BYTES);
+      frames = this.encoder.encode(wire, REPLY_CAP_BYTES, this.txFrame - FRAME_HEADER_BYTES);
     } catch (e) {
       if (!(e instanceof FrameTooLargeError)) throw e;
       const id = (obj as { id?: unknown }).id;
@@ -197,6 +207,7 @@ export class FakePeripheral {
           error: { code: 'tooLarge', message: 'reply too large' },
         },
         REPLY_CAP_BYTES,
+        this.txFrame - FRAME_HEADER_BYTES,
       );
     }
     frames.forEach((f, i) => {
@@ -233,6 +244,8 @@ export class FakePeripheral {
       mtu,
       fmax: Math.min(63, mtu - 3),
       seg: this.segmented ? 1 : 0,
+      // Only a build that accepts hello.frameMax advertises it (§14.3).
+      ...(this.device.acceptsFrameMax && !this.segmented ? { txMax: 255 } : {}),
     });
     const bytes = new TextEncoder().encode(json);
     return new DataView(bytes.buffer);
@@ -276,6 +289,8 @@ export class FakePeripheral {
     this.notifyingChanged(false);
     this.reassembler = new FrameReassembler();
     this.segBuf = new Uint8Array(0);
+    this.txFrame = HID_REPORT_BYTES;
+    this.device.resetTxFrame();
     // The firmware clears the handler's subscriptions when the link goes down (§4.4).
     try {
       this.device.handle('subscribe', { metricsHz: 0, beatHz: 0, timingHz: 0, quartzHz: 0 });
@@ -320,6 +335,8 @@ export class FakePeripheral {
       const result = handle(op, body);
       if (op === 'hello') this.patchHello(result as HidHelloResult);
       this.sendObject({ v: 1, id, ok: true, result });
+      // The hello is answered with the old frame size; the new one applies after it (§14.3).
+      if (op === 'hello') this.txFrame = this.effectiveFrame();
     } catch (e) {
       const code: HidErrorCode = e instanceof DeviceError ? (e.code as HidErrorCode) : 'internal';
       const message = e instanceof Error ? e.message : String(e);
@@ -327,9 +344,19 @@ export class FakePeripheral {
     }
   }
 
-  /** Makes `hello.link.mtu` follow the (possibly changed) fake MTU. */
+  /** TX frame size the device will use: its own choice limited by the current fake MTU. */
+  private effectiveFrame(): number {
+    return Math.max(
+      HID_REPORT_BYTES,
+      Math.min(this.device.txFrameBytes, this.mtu - 3, this.segmented ? HID_REPORT_BYTES : 255),
+    );
+  }
+
+  /** Makes `hello.link.mtu` and `frameMax` follow the (possibly changed) fake MTU. */
   private patchHello(hello: HidHelloResult): void {
-    if (hello.link?.kind === 'ble') hello.link.mtu = this.mtu;
+    if (hello.link?.kind !== 'ble') return;
+    hello.link.mtu = this.mtu;
+    if (hello.link.frameMax !== undefined) hello.link.frameMax = this.effectiveFrame();
   }
 
   /** Splits one frame into segments in segmented mode and schedules delivery. */

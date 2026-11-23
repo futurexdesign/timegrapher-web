@@ -20,6 +20,11 @@ export interface BleSimOptions {
   mtu?: number;
   /** Duration of every GATT write in ms (default 7.5, a typical connection interval). */
   writeLatencyMs?: number;
+  /**
+   * `false` models a device from before BLE_TRANSPORT_PLAN.md §14: no INFO
+   * `txMax`, 63-byte frames, no packed beats (default `true`).
+   */
+  modern?: boolean;
 }
 
 /** A {@link ContractHarness} that can also cut the BLE link. */
@@ -31,11 +36,12 @@ export interface BleSimHarness extends ContractHarness {
 }
 
 /**
- * @param options MTU and write latency.
+ * @param options MTU, write latency and device generation.
  * @returns A harness running `WebBleTransport` over the fake GATT stack.
  */
 export function createBleSimHarness(options: BleSimOptions = {}): BleSimHarness {
   const mtu = options.mtu ?? 185;
+  const modern = options.modern ?? true;
   let transport: Transport | null = null;
   let bluetooth: FakeBluetooth | null = null;
   const peripheral = (): FakePeripheral => {
@@ -43,7 +49,7 @@ export function createBleSimHarness(options: BleSimOptions = {}): BleSimHarness 
     return bluetooth.peripheral;
   };
   const h: BleSimHarness = {
-    name: `ble-sim mtu ${mtu}`,
+    name: `ble-sim mtu ${mtu}${modern ? '' : ' old device'}`,
     expected: SIM_EXPECTED,
     get bluetooth() {
       return bluetooth;
@@ -65,6 +71,8 @@ export function createBleSimHarness(options: BleSimOptions = {}): BleSimHarness 
           writeLatencyMs: options.writeLatencyMs ?? 7.5,
           deviceOptions: {
             seed: 42,
+            largeFrames: modern,
+            beatsPacked: modern,
             mechanical: {
               vph: 28800,
               rateSDay: SIM_EXPECTED.rateSDay,

@@ -46,7 +46,7 @@ export const LINK_RATE_CAPS: Readonly<
 };
 
 /** Flag fields of {@link HidSubscription} (merged by OR). */
-const FLAG_KEYS = ['events', 'errors', 'quartzPulses', 'beats'] as const;
+const FLAG_KEYS = ['events', 'errors', 'quartzPulses', 'beats', 'beatsPacked'] as const;
 
 /** Retry delays (ms) after a failed `subscribe`; the last one repeats. */
 export const SUBSCRIBE_RETRY_MS: readonly number[] = [1000, 2000, 5000, 10000];
@@ -61,6 +61,7 @@ const QUIET: HidSubscription = {
   errors: false,
   quartzPulses: false,
   beats: false,
+  beatsPacked: false,
 };
 
 /** Listener for one notify op. */
@@ -92,6 +93,22 @@ export function clampToLink(sub: HidSubscription, kind: TransportKind | null): H
   const out: HidSubscription = { ...sub };
   for (const k of RATE_KEYS) out[k] = Math.min(out[k], caps[k]);
   return out;
+}
+
+/**
+ * Swaps the JSON beat stream for the packed one (BLE_TRANSPORT_PLAN.md §14.2).
+ * Consumers always claim `beats: true`; when the device advertises
+ * `caps.beatsPacked` the request becomes `beatsPacked: true, beats: false`
+ * (the device would send only the packed stream anyway). Older firmware gets
+ * the plain `beats` stream.
+ * @param sub Merged subscription.
+ * @param packedSupported `true` when `hello.caps.beatsPacked` is present.
+ * @returns `sub` itself when nothing is swapped, else a modified copy.
+ */
+export function preferPackedBeats(sub: HidSubscription, packedSupported: boolean): HidSubscription {
+  if (!packedSupported) return { ...sub, beatsPacked: false };
+  const wantsBeats = sub.beats === true || sub.beatsPacked === true;
+  return { ...sub, beats: false, beatsPacked: wantsBeats };
 }
 
 /**
@@ -131,7 +148,12 @@ export const useSubscriptionsStore = defineStore('subscriptions', () => {
   /** What the device last echoed (authoritative, includes firmware clamping). */
   const active = ref<HidSubscription>({ ...QUIET });
   /** Desired merged subscription, clamped to what the link can carry. */
-  const desired = computed(() => clampToLink(mergeClaims(claims.value.values()), connection.kind));
+  const desired = computed(() =>
+    clampToLink(
+      preferPackedBeats(mergeClaims(claims.value.values()), connection.features.beatsPacked),
+      connection.kind,
+    ),
+  );
 
   const handlers = new Map<NotifyOp, Set<(data: unknown) => void>>();
   let offNotify: (() => void) | null = null;

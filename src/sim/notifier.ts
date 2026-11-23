@@ -19,6 +19,8 @@ export interface RateCaps {
   quartz: boolean;
   /** `getBeats` / `subscribe.beats` exist. */
   beats: boolean;
+  /** `subscribe.beatsPacked` exists (`caps.beatsPacked`, BLE_TRANSPORT_PLAN.md §14.2). */
+  beatsPacked: boolean;
 }
 
 /** Periodic notify kinds. */
@@ -48,15 +50,21 @@ export class SubscriptionState {
     errors: false,
     quartzPulses: false,
     beats: false,
+    beatsPacked: false,
   };
   private due: Record<PeriodicKind, number> = { metrics: 0, beat: 0, timing: 0, quartz: 0 };
 
   /** @param caps Rate caps. */
   constructor(private readonly caps: RateCaps) {}
 
-  /** @returns A copy of the active subscription (the `subscribe` result). */
+  /**
+   * @returns A copy of the active subscription (the `subscribe` result). Like
+   *   older firmware, it has no `beatsPacked` key when the device lacks the feature.
+   */
   current(): HidSubscription {
-    return { ...this.sub };
+    const out = { ...this.sub };
+    if (!this.caps.beatsPacked) delete out.beatsPacked;
+    return out;
   }
 
   /** @returns `true` when any push is active (the device needs polling). */
@@ -70,17 +78,26 @@ export class SubscriptionState {
       s.events ||
       s.errors ||
       s.quartzPulses ||
-      s.beats === true
+      s.beats === true ||
+      s.beatsPacked === true
     );
   }
 
   /** @returns Active flag values (for the device's feed checks). */
-  get flags(): { events: boolean; errors: boolean; quartzPulses: boolean; beats: boolean } {
+  get flags(): {
+    events: boolean;
+    errors: boolean;
+    quartzPulses: boolean;
+    beats: boolean;
+    beatsPacked: boolean;
+  } {
     return {
       events: this.sub.events,
       errors: this.sub.errors,
       quartzPulses: this.sub.quartzPulses,
-      beats: this.sub.beats === true,
+      // The packed stream replaces the JSON one when both are set (§14.2).
+      beats: this.sub.beats === true && this.sub.beatsPacked !== true,
+      beatsPacked: this.sub.beatsPacked === true,
     };
   }
 
@@ -101,11 +118,13 @@ export class SubscriptionState {
     if (typeof body.events === 'boolean') s.events = body.events;
     if (typeof body.errors === 'boolean') s.errors = body.errors;
     if (typeof body.beats === 'boolean') s.beats = body.beats;
+    if (typeof body.beatsPacked === 'boolean') s.beatsPacked = body.beatsPacked;
     if (!c.quartz) {
       s.quartzHz = 0;
       s.quartzPulses = false;
     }
     if (!c.beats) s.beats = false;
+    if (!c.beatsPacked) s.beatsPacked = false;
     for (const k of PERIODIC) this.due[k] = nowMs + this.periodMs(k);
     return this.current();
   }

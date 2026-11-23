@@ -10,6 +10,7 @@
  * `getTime`.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beatsOfResult, decodeBeatsPacked } from '@/protocol/beatsPacked';
 import type {
   DspBeat,
   HidNotify,
@@ -250,9 +251,9 @@ export function runTransportContract(make: () => ContractHarness): void {
         await req('start');
         await h.advance(4000);
         await req('stop');
-        const a = (await req('getBeats', { max: 1 })).beats[0];
+        const a = beatsOfResult(await req('getBeats', { max: 1 }))[0];
         await h.advance(4000);
-        const b = (await req('getBeats', { max: 1 })).beats[0];
+        const b = beatsOfResult(await req('getBeats', { max: 1 }))[0];
         expect(b?.seq).toBe(a?.seq);
       });
     });
@@ -288,10 +289,44 @@ export function runTransportContract(make: () => ContractHarness): void {
         await collect(12000);
         for (const n of notifies)
           if (n.op === 'beats') expect(n.data.beats.length).toBeLessThanOrEqual(8);
-        const r = await req('getBeats', { max: 99 });
-        expect(r.beats.length).toBeLessThanOrEqual(8);
-        for (let i = 1; i < r.beats.length; i++) {
-          expect((r.beats[i] as DspBeat).seq).toBeLessThan((r.beats[i - 1] as DspBeat).seq);
+        const beats = beatsOfResult(await req('getBeats', { max: 99 }));
+        expect(beats.length).toBeLessThanOrEqual(8);
+        for (let i = 1; i < beats.length; i++) {
+          expect((beats[i] as DspBeat).seq).toBeLessThan((beats[i - 1] as DspBeat).seq);
+        }
+      });
+
+      it('PK-30 delivers packed beats in seq order when caps.beatsPacked is set', async () => {
+        if ((await req('hello')).caps.beatsPacked === undefined) return;
+        await req('setTimebase', { ppm: h.expected?.calPpm ?? 0 });
+        await req('subscribe', { beatsPacked: true });
+        await req('start');
+        notifies.length = 0;
+        await h.advance(12000);
+        expect(notifies.some((n) => n.op === 'beats')).toBe(false);
+        const beats = notifies.flatMap((n) =>
+          n.op === 'beatsPacked' ? decodeBeatsPacked(n.data.p, 48000) : [],
+        );
+        expect(beats.length).toBeGreaterThan(20);
+        for (let i = 1; i < beats.length; i++) {
+          const a = beats[i - 1] as DspBeat;
+          const b = beats[i] as DspBeat;
+          expect(b.seq).toBe(a.seq + 1);
+          expect(b.tS).toBeGreaterThan(a.tS);
+        }
+        expect(beats[0]?.status).toBe('started');
+      });
+
+      it('PK-31 getBeats {packed: true} returns the newest beats, newest last', async () => {
+        if ((await req('hello')).caps.beatsPacked === undefined) return;
+        await collect(12000);
+        const r = await req('getBeats', { max: 8, packed: true });
+        expect(r).toHaveProperty('p');
+        const beats = beatsOfResult(r, 48000);
+        const plain = beatsOfResult(await req('getBeats', { max: 8 }));
+        expect(beats.at(-1)?.seq).toBe(plain[0]?.seq);
+        for (let i = 1; i < beats.length; i++) {
+          expect((beats[i] as DspBeat).seq).toBeGreaterThan((beats[i - 1] as DspBeat).seq);
         }
       });
 
@@ -353,7 +388,7 @@ export function runTransportContract(make: () => ContractHarness): void {
         await req('stop');
         await req('start');
         await h.advance(6000);
-        const newest = (await req('getBeats', { max: 8 })).beats;
+        const newest = beatsOfResult(await req('getBeats', { max: 8 }));
         expect(Math.min(...newest.map((b) => b.seq))).toBeLessThan(80);
         expect(newest.at(-1)?.seq).toBeLessThan(60);
       });
